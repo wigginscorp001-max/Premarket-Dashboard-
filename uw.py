@@ -74,7 +74,7 @@ def get(path: str, params: dict | None = None, ticker: str | None = None):
     """GET an endpoint (a key of ENDPOINTS or a raw '/api/...' path). Returns parsed JSON."""
     key = api_key()
     if not key:
-        raise UWError("No Unusual Whales key found. Add UW_API_KEY=... to the .env file.")
+        raise UWError("No Unusual Whales key found. Add UW_API_KEY to Streamlit Secrets (or .env on your Mac).")
     path = ENDPOINTS.get(path, path)
     if ticker:
         path = path.replace("{ticker}", ticker.upper())
@@ -82,7 +82,7 @@ def get(path: str, params: dict | None = None, ticker: str | None = None):
     r = requests.get(BASE + path, params=params, timeout=20,
                      headers={"Authorization": f"Bearer {key}", "Accept": "application/json"})
     if r.status_code == 401:
-        raise UWError("Unusual Whales rejected the key (401). Check UW_API_KEY in .env.")
+        raise UWError("Unusual Whales rejected the key (401). Check UW_API_KEY in Streamlit Secrets (or .env on your Mac).")
     if r.status_code == 403:
         raise UWError(f"Your UW plan doesn't include {path} (403).")
     if r.status_code == 404:

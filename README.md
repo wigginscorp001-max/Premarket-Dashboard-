@@ -20,11 +20,12 @@ Flip **Demo data** in the sidebar to test the layout without internet.
 | Page | What it shows |
 |---|---|
 | 🌅 Pre-Market | Futures & macro · every watchlist ticker: prior close, PM last, gap, PM high/low/VWAP, **PM bias**, PM volume |
-| 🧭 PM → Close | Today: PM bias → opening range (9:30–10:00) → behavior → afternoon (1–4 PM) · 60-session history per ticker: how often the PM bias continued, chopped, took PM high/low, and whether the afternoon followed |
+| 🗂️ Sectors | Every S&P 500 sector: pick one, see its companies, scan its pre-market (gainers, losers, gap by sub-industry), or look up any ticker |
+| 🧭 PM → Close | Today: PM bias → 30-min opening range (9:30–10:00), ORB break time and extension → behavior → afternoon (1–4 PM) · 60-session history per ticker: how often the PM bias continued, chopped, took PM high/low, and whether the afternoon followed |
 | 📐 Setups & Patterns | Bull/bear flags, rising/falling wedges, ascending/descending/symmetrical triangles, channels, double tops/bottoms, 20-day breakouts, RSI extremes, inside bars, NR7 · daily or 5-minute · how often each pattern worked on that ticker before |
 | 🐋 Options Flow | Unusual Whales: flow alerts, per-ticker options (IV rank, max pain, volume, flow), market tide, dark pool, gamma exposure, earnings today |
 | 🎯 Options & LEAPS | Long-dated options with delta, breakeven, P(ITM), P(profit), fit score |
-| 📅 Earnings | Upcoming reports, implied vs historical move |
+| 📅 Earnings | This/next week's reports with date, time and BMO/AMC (watchlist + whole market via UW) · implied vs historical move |
 | 📈 Swing Odds | ATR stop/target with historical win rate per setup |
 | ⚡ Day Trading | Live chart with VWAP, PM high/low, opening range, pivots, RVOL |
 | 🧩 My Scripts | Your own Python/terminal scripts |

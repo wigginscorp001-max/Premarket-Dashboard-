@@ -263,7 +263,7 @@ def day_levels(intra: pd.DataFrame, daily: pd.DataFrame) -> dict:
     t = intra[intra.index.date == today]
     pm = t[t.index.time < dt.time(9, 30)]
     rth = t[(t.index.time >= dt.time(9, 30)) & (t.index.time < dt.time(16, 0))]
-    orb = rth[rth.index.time < dt.time(9, 45)]
+    orb = rth[rth.index.time < dt.time(10, 0)]  # 30-minute opening range
     lv: dict[str, float] = {}
     if len(prev):
         H, L, C = prev["High"].max(), prev["Low"].min(), prev["Close"].iloc[-1]

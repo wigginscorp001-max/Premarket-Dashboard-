@@ -266,6 +266,47 @@ def next_earnings(ticker: str, demo: bool = False) -> dict:
             "Revenue est": None}
 
 
+def _session_of(ts: pd.Timestamp) -> str:
+    if ts.hour == 0 and ts.minute == 0:
+        return "Time not confirmed"
+    hm = ts.hour * 60 + ts.minute
+    return ("Before open (BMO)" if hm < 570 else "After close (AMC)" if hm >= 960
+            else "During market hours")
+
+
+def earnings_between(tickers: list[str], start: dt.date, end: dt.date,
+                     demo: bool = False) -> pd.DataFrame:
+    """Watchlist earnings reports between two dates, with time of day and BMO/AMC."""
+    rows = []
+    for t in tickers:
+        if not (demo or FORCE_DEMO) and yf is not None:
+            try:
+                ed = yf.Ticker(t).get_earnings_dates(limit=8)
+            except Exception as e:  # noqa: BLE001
+                _warn(f"{t} earnings dates: {e.__class__.__name__}")
+                continue
+            if ed is None or ed.empty:
+                continue
+            for ts, r in ed.iterrows():
+                ts = ts.tz_convert(ET)
+                if start <= ts.date() <= end:
+                    rows.append({"Date": ts.date(), "Day": f"{ts:%a}", "Ticker": t,
+                                 "Time (ET)": "—" if ts.hour == 0 and ts.minute == 0 else f"{ts:%I:%M %p}",
+                                 "When": _session_of(ts), "EPS est": r.get("EPS Estimate"),
+                                 "EPS actual": r.get("Reported EPS")})
+        elif t not in ETFS:
+            rng = _rng(t, f"week{start}")
+            if rng.random() < 0.3:
+                d = start + dt.timedelta(days=int(rng.integers(0, 5)))
+                ts = pd.Timestamp(dt.datetime.combine(d, dt.time(16, 5) if rng.random() < 0.6
+                                                      else dt.time(7, 0)), tz=ET)
+                rows.append({"Date": d, "Day": f"{ts:%a}", "Ticker": t, "Time (ET)": f"{ts:%I:%M %p}",
+                             "When": _session_of(ts), "EPS est": round(float(rng.uniform(0.2, 4)), 2),
+                             "EPS actual": None})
+    out = pd.DataFrame(rows, columns=["Date", "Day", "Ticker", "Time (ET)", "When", "EPS est", "EPS actual"])
+    return out.sort_values(["Date", "When", "Ticker"]).reset_index(drop=True)
+
+
 def past_earnings_dates(ticker: str, demo: bool = False) -> list[pd.Timestamp]:
     """Past report timestamps (with time of day when known)."""
     if not (demo or FORCE_DEMO) and yf is not None:

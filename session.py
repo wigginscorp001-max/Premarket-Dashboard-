@@ -72,6 +72,24 @@ def analyze_day(day: pd.DataFrame, prev_close: float = NAN) -> dict:
     row["Behavior"] = classify_behavior(bias, row["ORB high"], row["ORB low"], intraday)
     row["Took PM high"] = bool(rth["High"].max() > row["PM high"])
     row["Took PM low"] = bool(rth["Low"].min() < row["PM low"])
+    # Opening-range breakout: first 5-min bar after 10:00 to trade through each side.
+    orb_rng = row["ORB high"] - row["ORB low"]
+    up_hits = intraday[intraday["High"] > row["ORB high"]]
+    dn_hits = intraday[intraday["Low"] < row["ORB low"]]
+    up_t = up_hits.index[0] if len(up_hits) else None
+    dn_t = dn_hits.index[0] if len(dn_hits) else None
+    if up_t is not None and (dn_t is None or up_t <= dn_t):
+        row["ORB break"] = f"Up {up_t:%H:%M}" + (f", then down {dn_t:%H:%M}" if dn_t is not None else "")
+    elif dn_t is not None:
+        row["ORB break"] = f"Down {dn_t:%H:%M}" + (f", then up {up_t:%H:%M}" if up_t is not None else "")
+    else:
+        row["ORB break"] = "No break"
+    row["Broke ORB high"], row["Broke ORB low"] = up_t is not None, dn_t is not None
+    row["ORB range %"] = orb_rng / row["Open"] * 100
+    if orb_rng > 0:
+        # how far price ran past the range, in multiples of the range (1.0 = a full range)
+        row["Ext above ORB (x)"] = max(intraday["High"].max() - row["ORB high"], 0) / orb_rng
+        row["Ext below ORB (x)"] = max(row["ORB low"] - intraday["Low"].min(), 0) / orb_rng
     if len(morning):
         row["Morning %"] = (morning["Close"].iloc[-1] / row["Open"] - 1) * 100
     if len(afternoon):
@@ -130,6 +148,8 @@ def odds(hist: pd.DataFrame, bias: str | None = None) -> dict:
         "Sessions": len(h),
         "Continuation %": is_cont.mean() * 100,
         "Chop %": (h["Behavior"] == "Choppy / Range Expansion").mean() * 100,
+        "Broke ORB high %": h["Broke ORB high"].mean() * 100,
+        "Broke ORB low %": h["Broke ORB low"].mean() * 100,
         "Took PM high %": h["Took PM high"].mean() * 100,
         "Took PM low %": h["Took PM low"].mean() * 100,
         "Most common": h["Behavior"].mode().iloc[0],

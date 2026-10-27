@@ -15,6 +15,7 @@ import streamlit as st
 import analytics as an
 import data
 import patterns as pt
+import sectors as secs
 import session as ses
 import uw
 
@@ -162,6 +163,16 @@ def load_patterns(tks: tuple, demo: bool, timeframe: str):
     return found, stats
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_sp500() -> pd.DataFrame:
+    return secs.sp500()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_earnings_week(tks: tuple, start: dt.date, end: dt.date, demo: bool) -> pd.DataFrame:
+    return data.earnings_between(list(tks), start, end, demo=demo)
+
+
 @st.cache_data(ttl=8, show_spinner=False)
 def load_uw(name: str, params: tuple = (), ticker: str | None = None):
     return uw.fetch(name, dict(params), ticker)
@@ -222,10 +233,29 @@ if status == "Pre-market":
     status_note = f"opens in {mins // 60}h {mins % 60}m"
 else:
     status_note = ""
-feed_ok = bool(uw.api_key()) and not demo
-feed = ('<span class="dot ok"></span>UW FEED: <b class="ok">CONNECTED</b>' if feed_ok else
-        '<span class="dot off"></span>UW FEED: <b class="off">DEMO DATA</b>' if demo else
-        '<span class="dot off"></span>UW FEED: <b class="off">NO KEY</b>')
+@st.cache_data(ttl=300, show_spinner=False)
+def check_feed(key_tail: str) -> str:
+    """Make one real Unusual Whales call so the badge reflects whether data actually flows."""
+    try:
+        return "ok" if len(uw.candles("SPY", "5m")) else "empty"
+    except uw.UWError as e:
+        return str(e)
+    except Exception as e:  # noqa: BLE001
+        return f"{e.__class__.__name__}: {e}"
+
+
+key = uw.api_key()
+if demo:
+    feed = '<span class="dot off"></span>UW FEED: <b class="off">DEMO DATA</b>'
+elif not key:
+    feed = '<span class="dot off"></span>UW FEED: <b class="off">NO KEY</b>'
+else:
+    feed_state = check_feed(key[-4:])
+    if feed_state == "ok":
+        feed = '<span class="dot ok"></span>UW FEED: <b class="ok">LIVE</b>'
+    else:
+        feed = '<span class="dot off"></span>UW FEED: <b class="off">ERROR</b>'
+        st.error(f"Unusual Whales isn't returning data: {feed_state}")
 st.markdown(f"""
 <div class="hdr">
   <div class="brand">
@@ -242,9 +272,9 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-tabs = st.tabs(["🌅 Pre-Market", "🧭 PM → Close", "📐 Setups & Patterns", "🐋 Options Flow",
-                "🎯 Options & LEAPS", "📅 Earnings", "📈 Swing Odds", "⚡ Day Trading",
-                "🧩 My Scripts"])
+tabs = st.tabs(["🌅 Pre-Market", "🗂️ Sectors", "🧭 PM → Close", "📐 Setups & Patterns",
+                "🐋 Options Flow", "🎯 Options & LEAPS", "📅 Earnings", "📈 Swing Odds",
+                "⚡ Day Trading", "🧩 My Scripts"])
 
 # --------------------------------------------------------------------------- #
 # 1. Pre-market
@@ -309,9 +339,93 @@ with tabs[0]:
         st.plotly_chart(style_fig(fig, 420), width="stretch", theme="streamlit")
 
 # --------------------------------------------------------------------------- #
-# 1a. Pre-market setup vs what happened by the afternoon
+# 1. Sectors: every S&P 500 sector, pre-market scan + company lookup
 # --------------------------------------------------------------------------- #
 with tabs[1]:
+    try:
+        sp = load_sp500()
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"Couldn't load the S&P 500 sector list ({e.__class__.__name__}). "
+                   "Showing your watchlist as one group instead.")
+        sp = pd.DataFrame({"Ticker": tickers, "Company": tickers, "Sector": "Watchlist",
+                           "Sub-industry": "—"})
+    sector_names = sorted(sp["Sector"].unique())
+    c1, c2 = st.columns([2, 1])
+    sec = c1.selectbox("Sector", sector_names + ["ALL sectors (slow – ~500 tickers)"], key="sec_pick")
+    lookup = c2.text_input("Look up any ticker", "", placeholder="e.g. NVDA").strip().upper()
+
+    if lookup:
+        hit = sp[sp["Ticker"] == lookup]
+        info = hit.iloc[0] if len(hit) else None
+        st.markdown(f"**{lookup}** — {info['Company']} · {info['Sector']} · {info['Sub-industry']}"
+                    if info is not None else f"**{lookup}** (not in the S&P 500 list)")
+        one = load_today((lookup,), demo)
+        cols1 = [c for c in ("Ticker", "Prev close", "PM last", "Gap %", "PM high", "PM low", "PM VWAP",
+                             "PM bias", "PM volume", "Last PM print", "ORB high", "ORB low",
+                             "ORB break", "Behavior") if c in one.columns]
+        st.dataframe(one[cols1].style.format({"Gap %": "{:+.2f}%"}, precision=2, na_rep="—")
+                     .map(bias_color, subset=[c for c in ["PM bias"] if c in cols1]),
+                     hide_index=True, width="stretch")
+
+    members = sp if sec.startswith("ALL") else sp[sp["Sector"] == sec]
+    with st.expander(f"{len(members)} companies in {sec.split(' (')[0]}"):
+        st.dataframe(members, hide_index=True, width="stretch", height=420)
+
+    if st.button(f"🔎 Scan pre-market for {sec.split(' (')[0]}", type="primary"):
+        st.session_state["sector_scanned"] = sec
+    if st.session_state.get("sector_scanned") == sec:
+        rows = []
+        prog = st.progress(0.0, text="Scanning…")
+        tl = members["Ticker"].tolist()
+        for i, t in enumerate(tl):
+            rows.append(load_today((t,), demo))
+            prog.progress((i + 1) / len(tl), text=f"Scanning {i + 1}/{len(tl)}: {t}")
+        prog.empty()
+        res = pd.concat(rows, ignore_index=True).merge(members, on="Ticker", how="left")
+        g = res.dropna(subset=["Gap %"]) if "Gap %" in res else res.iloc[:0]
+        if g.empty:
+            st.info("No pre-market prints yet for this group.")
+        else:
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Gapping up", int((g["Gap %"] > 0).sum()))
+            m2.metric("Gapping down", int((g["Gap %"] < 0).sum()))
+            m3.metric("Average gap", f"{g['Gap %'].mean():+.2f}%")
+            m4.metric("Bullish PM bias", f"{(g['PM bias'] == 'BULLISH').mean() * 100:.0f}%")
+            show = [c for c in ("Ticker", "Company", "Sub-industry", "PM last", "Gap %", "PM high",
+                                "PM low", "PM bias", "PM volume") if c in g.columns]
+            fmt = {"Gap %": "{:+.2f}%", "PM last": "{:,.2f}", "PM high": "{:,.2f}", "PM low": "{:,.2f}",
+                   "PM volume": "{:,.0f}"}
+            left, right = st.columns(2)
+            with left:
+                st.markdown("**Top gainers**")
+                st.dataframe(g.nlargest(10, "Gap %")[show].style.format(fmt, na_rep="—")
+                             .map(signed_color, subset=["Gap %"]), hide_index=True, width="stretch")
+            with right:
+                st.markdown("**Top losers**")
+                st.dataframe(g.nsmallest(10, "Gap %")[show].style.format(fmt, na_rep="—")
+                             .map(signed_color, subset=["Gap %"]), hide_index=True, width="stretch")
+            group = "Sector" if sec.startswith("ALL") else "Sub-industry"
+            by = g.groupby(group)["Gap %"].mean().sort_values()
+            fig = go.Figure(go.Bar(x=by.values, y=by.index, orientation="h",
+                                   marker_color=[UP if v > 0 else DOWN for v in by.values],
+                                   hovertemplate="%{y}: %{x:+.2f}%<extra></extra>"))
+            fig.update_layout(title=f"Average pre-market gap by {group.lower()}",
+                              height=max(300, 24 * len(by)), margin=dict(l=10, r=10, t=40, b=10),
+                              xaxis_ticksuffix="%")
+            st.plotly_chart(fig, width="stretch", theme="streamlit")
+            st.markdown("**Every ticker**")
+            st.dataframe(res[[c for c in show + ["Behavior"] if c in res.columns]]
+                         .sort_values("Gap %", ascending=False, na_position="last")
+                         .style.format(fmt, na_rep="—").map(signed_color, subset=["Gap %"])
+                         .map(bias_color, subset=[c for c in ["PM bias"] if c in res.columns]),
+                         hide_index=True, width="stretch", height=520)
+            st.download_button("Download this scan (CSV)", res.to_csv(index=False),
+                               file_name=f"premarket_{sec.split(' ')[0]}_{data.now_et():%Y-%m-%d}.csv")
+
+# --------------------------------------------------------------------------- #
+# 1a. Pre-market setup vs what happened by the afternoon
+# --------------------------------------------------------------------------- #
+with tabs[2]:
     st.caption("Your pre-market rules: **PM bias** = last pre-market price vs pre-market VWAP. "
                "**Opening range** = 9:30–10:00. **Behavior** compares the price after 10:00 with "
                "the opening range. **Afternoon** = 1:00–4:00 PM.")
@@ -321,7 +435,8 @@ with tabs[1]:
         with st.spinner("Loading today's sessions…"):
             td = load_today(tuple(tickers), demo)
         cols = [c for c in ("Ticker", "PM bias", "Gap %", "PM high", "PM low", "PM VWAP",
-                            "ORB high", "ORB low", "Price", "Behavior", "Took PM high", "Took PM low",
+                            "ORB high", "ORB low", "ORB range %", "ORB break", "Ext above ORB (x)",
+                            "Ext below ORB (x)", "Price", "Behavior", "Took PM high", "Took PM low",
                             "Morning %", "Afternoon %", "Afternoon followed PM?", "Close vs PM VWAP")
                 if c in td.columns]
         st.subheader("Today")
@@ -329,7 +444,9 @@ with tabs[1]:
             td[cols].style.format({c: "{:,.2f}" for c in ("PM high", "PM low", "PM VWAP", "ORB high",
                                                            "ORB low", "Price") if c in cols}
                                   | {c: "{:+.2f}%" for c in ("Gap %", "Morning %", "Afternoon %")
-                                     if c in cols}, na_rep="—")
+                                     if c in cols}
+                                  | {"ORB range %": "{:.2f}%", "Ext above ORB (x)": "{:.1f}x",
+                                     "Ext below ORB (x)": "{:.1f}x"}, na_rep="—")
             .map(bias_color, subset=["PM bias"] if "PM bias" in cols else [])
             .map(signed_color, subset=[c for c in ("Gap %", "Morning %", "Afternoon %") if c in cols]),
             hide_index=True, width="stretch", height=min(38 * (len(td) + 1), 700))
@@ -383,7 +500,7 @@ with tabs[1]:
         fig.update_layout(barmode="group", title=f"{ht}: what happened after each pre-market bias",
                           height=360, margin=dict(l=10, r=10, t=40, b=10))
         st.plotly_chart(fig, width="stretch", theme="streamlit")
-        show = [c for c in ("Date", "PM bias", "Gap %", "Behavior", "Took PM high", "Took PM low",
+        show = [c for c in ("Date", "PM bias", "Gap %", "ORB break", "Behavior", "Took PM high", "Took PM low",
                             "Morning %", "Afternoon %", "Afternoon followed PM?") if c in h.columns]
         st.dataframe(h[show].iloc[::-1].style.format({"Gap %": "{:+.2f}%", "Morning %": "{:+.2f}%",
                                                       "Afternoon %": "{:+.2f}%"}, na_rep="—")
@@ -392,7 +509,7 @@ with tabs[1]:
 # --------------------------------------------------------------------------- #
 # 1b. Chart patterns / setups
 # --------------------------------------------------------------------------- #
-with tabs[2]:
+with tabs[3]:
     c1, c2, c3 = st.columns([1, 1, 2])
     tf = c1.radio("Timeframe", ["Daily", "5-minute"], horizontal=True,
                   help="Daily = swing setups. 5-minute = intraday setups (regular hours, last 60 days).")
@@ -457,7 +574,7 @@ with tabs[2]:
 # --------------------------------------------------------------------------- #
 # 1c. Unusual Whales (real-time flow, dark pool, GEX, market tide)
 # --------------------------------------------------------------------------- #
-with tabs[3]:
+with tabs[4]:
     if not uw.api_key():
         st.info("**Connect Unusual Whales:** on the hosted site, open the app's **Settings → Secrets** "
                 "and add `UW_API_KEY = \"your_key\"`. Running on your Mac, it reads the key from "
@@ -630,7 +747,50 @@ with tabs[3]:
 # --------------------------------------------------------------------------- #
 # 2. Earnings
 # --------------------------------------------------------------------------- #
-with tabs[5]:
+with tabs[6]:
+    st.subheader("Earnings this week")
+    today_d = data.now_et().date()
+    wk = st.radio("Week", ["This week", "Next week"], horizontal=True, key="earn_week")
+    monday = today_d - dt.timedelta(days=today_d.weekday()) + dt.timedelta(weeks=wk == "Next week")
+    friday = monday + dt.timedelta(days=4)
+    st.caption(f"{monday:%a %b %d} – {friday:%a %b %d}. **BMO** = reports before the 9:30 open "
+               "(trade the reaction that morning). **AMC** = reports after the 4:00 close "
+               "(reaction is the next morning's pre-market).")
+    ew_tabs = st.tabs(["Your watchlist", "All companies (Unusual Whales)"])
+    with ew_tabs[0]:
+        with st.spinner("Loading earnings dates…"):
+            ew = load_earnings_week(tuple(tickers), monday, friday, demo)
+        if ew.empty:
+            st.info("None of your watchlist tickers report this week.")
+        else:
+            st.dataframe(ew.style.format({"EPS est": "{:.2f}", "EPS actual": "{:.2f}"}, na_rep="—"),
+                         hide_index=True, width="stretch")
+    with ew_tabs[1]:
+        if not uw.api_key() or demo:
+            st.info("Needs your Unusual Whales key (and Demo data off).")
+        else:
+            frames = []
+            for i in range(5):
+                d = monday + dt.timedelta(days=i)
+                for name, when in (("earnings_premarket", "Before open (BMO)"),
+                                   ("earnings_afterhours", "After close (AMC)")):
+                    df = uw_panel(name, {"date": d.isoformat()})
+                    if df is not None and len(df):
+                        frames.append(df.assign(Date=d, Day=f"{d:%a}", When=when))
+            if frames:
+                allw = pd.concat(frames, ignore_index=True)
+                tcol = first_col(allw, "symbol", "ticker", "ticker_symbol")
+                lead = [c for c in ("Date", "Day", "When", tcol, "full_name", "report_time",
+                                    "expected_move_perc", "street_mean_est") if c and c in allw.columns]
+                q = st.text_input("Filter (ticker)", "", key="earn_filter").upper()
+                if q and tcol:
+                    allw = allw[allw[tcol].astype(str).str.contains(q)]
+                st.dataframe(allw[lead + [c for c in allw.columns if c not in lead]],
+                             hide_index=True, width="stretch", height=520)
+                st.caption("If every day shows the same list, Unusual Whales ignored the date "
+                           "filter – tell Claude and it will switch to their per-ticker endpoint.")
+
+    st.divider()
     with st.spinner("Loading earnings calendar…"):
         er = load_earnings(tuple(tickers), demo)
     horizon = st.slider("Show reports in the next N days", 1, 90, 30)
@@ -677,7 +837,7 @@ with tabs[5]:
 # --------------------------------------------------------------------------- #
 # 3. Swing setups
 # --------------------------------------------------------------------------- #
-with tabs[6]:
+with tabs[7]:
     st.caption(f"Stop = {stop_atr}×ATR, target = {target_atr}×ATR, max {max_days} days. "
                "**P(target before stop)** = random-walk math; **P(touch target)** = lognormal "
                "with 20-day realized vol; **Hist win rate** = how often this exact setup hit "
@@ -712,7 +872,7 @@ with tabs[6]:
 # --------------------------------------------------------------------------- #
 # 4. LEAPS
 # --------------------------------------------------------------------------- #
-with tabs[4]:
+with tabs[5]:
     c1, c2, c3, c4 = st.columns(4)
     lt = c1.selectbox("Ticker", tickers, key="leaps_pick")
     kind = c2.radio("Type", ["call", "put"], horizontal=True)
@@ -746,7 +906,7 @@ with tabs[4]:
 # --------------------------------------------------------------------------- #
 # 5. Day trading
 # --------------------------------------------------------------------------- #
-with tabs[7]:
+with tabs[8]:
     c1, c2 = st.columns([1, 3])
     dtk = c1.selectbox("Ticker", tickers, key="dt_pick")
     interval = c1.radio("Bars", ["1m", "5m"], index=1, horizontal=True)
@@ -784,13 +944,13 @@ with tabs[7]:
         fig.update_yaxes(range=[lo - pad, hi + pad])
         st.plotly_chart(style_fig(fig, 600), width="stretch", theme="streamlit")
     st.caption("PDH/PDL/PDC = prior day high/low/close · PMH/PML = pre-market high/low · "
-               "ORH/ORL = 15-min opening range · R1/S1 = floor pivots. RVOL compares today's "
+               "ORH/ORL = 30-min opening range (9:30–10:00) · R1/S1 = floor pivots. RVOL compares today's "
                "volume so far with the same time of day on prior sessions.")
 
 # --------------------------------------------------------------------------- #
 # 6. Plugins: your own scripts
 # --------------------------------------------------------------------------- #
-with tabs[8]:
+with tabs[9]:
     st.caption("Drop a `.py` file into the `plugins/` folder with `TITLE = '…'` and "
                "`def run(tickers): …` – it appears here. See the examples in that folder.")
     plugin_files = sorted(p for p in (ROOT / "plugins").glob("*.py") if not p.name.startswith("_"))
