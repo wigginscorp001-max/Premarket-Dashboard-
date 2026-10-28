@@ -120,9 +120,9 @@ def split_days(df: pd.DataFrame) -> list[tuple]:
 
 def today(ticker: str, bars: pd.DataFrame) -> dict:
     if bars is None or bars.empty:
-        return {"Ticker": ticker, "Behavior": "no data"}
+        return {"Ticker": ticker, "Behavior": "No data – check the symbol"}
     day, g, prev_close = split_days(bars)[-1]
-    return {"Ticker": ticker, **analyze_day(g, prev_close)}
+    return {"Ticker": ticker, "Session date": day, **analyze_day(g, prev_close)}
 
 
 def history(bars: pd.DataFrame) -> pd.DataFrame:

@@ -76,3 +76,11 @@ Its printed output appears in the dashboard.
 * Probabilities are statistical estimates (lognormal / random walk / historical frequency),
   not predictions. Not financial advice.
 * Add your own swing setups in `analytics.setup_signals()`. They get backtested and appear in the scan.
+
+## Charts
+
+Price charts use [TradingView Lightweight Charts](https://github.com/tradingview/lightweight-charts)
+v4.2.0 (Apache-2.0), bundled in `static/` so they don't depend on another website.
+Every chart shows EMA 9 (blue), EMA 200 (white), volume and MACD 12/26/9 (MACD red, signal yellow).
+Touch: pinch to zoom, drag sideways to move, swipe up/down to scroll the page; **Reset view** returns
+to the latest candles.

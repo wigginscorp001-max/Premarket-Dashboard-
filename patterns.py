@@ -177,7 +177,10 @@ def pattern_lines(df: pd.DataFrame, name: str, w: int = 30) -> list[tuple]:
     seg = [tail.iloc[k * s:(k + 1) * s] for k in range(3)]
     lines = []
     for col, fn, lbl in (("High", "idxmax", "upper"), ("Low", "idxmin", "lower")):
-        p0, p2 = getattr(seg[0][col], fn)(), getattr(seg[2][col], fn)()
+        a, b = seg[0][col].dropna(), seg[2][col].dropna()
+        if a.empty or b.empty:  # gaps in the data: nothing to draw
+            return []
+        p0, p2 = getattr(a, fn)(), getattr(b, fn)()
         y0, y2 = seg[0][col][p0], seg[2][col][p2]
         i0, i2 = df.index.get_loc(p0), df.index.get_loc(p2)
         slope = (y2 - y0) / max(i2 - i0, 1)

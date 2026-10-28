@@ -34,6 +34,24 @@ def atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
     return tr.ewm(alpha=1 / n, adjust=False).mean()
 
 
+def heikin_ashi(df: pd.DataFrame) -> pd.DataFrame:
+    """Heikin Ashi candles: smoothed bars that make trends easier to see.
+    HA close = average of O/H/L/C; HA open = midpoint of the previous HA bar."""
+    if df.empty:
+        return df
+    ha = df.copy()
+    ha["Close"] = (df["Open"] + df["High"] + df["Low"] + df["Close"]) / 4
+    opens = np.empty(len(df))
+    opens[0] = (df["Open"].iloc[0] + df["Close"].iloc[0]) / 2
+    hc = ha["Close"].to_numpy()
+    for i in range(1, len(df)):
+        opens[i] = (opens[i - 1] + hc[i - 1]) / 2
+    ha["Open"] = opens
+    ha["High"] = pd.concat([df["High"], ha["Open"], ha["Close"]], axis=1).max(axis=1)
+    ha["Low"] = pd.concat([df["Low"], ha["Open"], ha["Close"]], axis=1).min(axis=1)
+    return ha
+
+
 def realized_vol(close: pd.Series, n: int = 20) -> float:
     return float(np.log(close).diff().tail(n).std() * math.sqrt(252))
 
@@ -237,7 +255,7 @@ def earnings_reactions(daily: pd.DataFrame, report_times: list[pd.Timestamp]) ->
         if pos <= 0 or pos >= len(idx):
             continue
         prev_c, o, c = daily["Close"].iloc[pos - 1], daily["Open"].iloc[pos], daily["Close"].iloc[pos]
-        rows.append({"Report": ts.strftime("%Y-%m-%d") + (" AMC" if after_close else " BMO"),
+        rows.append({"Report": ts.strftime("%d/%b/%Y") + (" AMC" if after_close else " BMO"),
                      "Gap %": (o / prev_c - 1) * 100, "Day move %": (c / prev_c - 1) * 100})
     return pd.DataFrame(rows)
 

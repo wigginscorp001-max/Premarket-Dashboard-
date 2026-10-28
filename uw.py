@@ -113,10 +113,11 @@ def fetch(name: str, params: dict | None = None, ticker: str | None = None) -> p
     return to_df(get(name, params, ticker))
 
 
-def candles(ticker: str, size: str = "5m") -> pd.DataFrame:
-    """OHLCV candles (incl. pre/post market) as Open/High/Low/Close/Volume, ET index."""
-    path = ENDPOINTS["ohlc"].replace("{size}", size)
-    df = to_df(get(path, ticker=ticker))
+_HISTORY: dict = {}   # (ticker, size) -> (fetched_at, candles before today)
+
+
+def _parse_candles(payload) -> pd.DataFrame:
+    df = to_df(payload)
     if df.empty:
         return df
     tcol = next((c for c in ("start_time", "timestamp", "time", "date", "end_time")
@@ -127,4 +128,30 @@ def candles(ticker: str, size: str = "5m") -> pd.DataFrame:
     out = pd.DataFrame({c.title(): pd.to_numeric(df[c], errors="coerce")
                         for c in ("open", "high", "low", "close", "volume") if c in df.columns})
     out.index = pd.DatetimeIndex(idx)
-    return out.sort_index()[~out.index.duplicated()]
+    return out
+
+
+def candles(ticker: str, size: str = "5m") -> pd.DataFrame:
+    """OHLCV candles (incl. pre/post market) as Open/High/Low/Close/Volume, ET index.
+
+    Without a date, UW returns recent history that stops at the previous session,
+    so today's candles are fetched separately with date=today and merged in.
+    History changes slowly and is reused for 30 minutes to save API calls.
+    """
+    import time
+    from zoneinfo import ZoneInfo
+
+    path = ENDPOINTS["ohlc"].replace("{size}", size)
+    key = (ticker.upper(), size)
+    hit = _HISTORY.get(key)
+    if hit and time.time() - hit[0] < 1800:
+        hist = hit[1]
+    else:
+        hist = _parse_candles(get(path, ticker=ticker))
+        _HISTORY[key] = (time.time(), hist)
+    today = pd.Timestamp.now(tz=ZoneInfo("America/New_York")).date().isoformat()
+    todays = _parse_candles(get(path, {"date": today}, ticker=ticker))
+    out = pd.concat([f for f in (hist, todays) if len(f)]) if len(hist) or len(todays) else hist
+    if out.empty:
+        return out
+    return out[~out.index.duplicated(keep="last")].sort_index()
