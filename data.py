@@ -40,6 +40,54 @@ MACRO = {
 }
 
 
+# Digital commodities named in the SEC/CFTC release, with their Yahoo Finance symbols.
+CRYPTO = {
+    "BTC": ("Bitcoin", "BTC-USD"), "ETH": ("Ether", "ETH-USD"), "SOL": ("Solana", "SOL-USD"),
+    "XRP": ("XRP", "XRP-USD"), "ADA": ("Cardano", "ADA-USD"), "AVAX": ("Avalanche", "AVAX-USD"),
+    "LINK": ("Chainlink", "LINK-USD"), "DOGE": ("Dogecoin", "DOGE-USD"), "DOT": ("Polkadot", "DOT-USD"),
+    "LTC": ("Litecoin", "LTC-USD"), "BCH": ("Bitcoin Cash", "BCH-USD"), "HBAR": ("Hedera", "HBAR-USD"),
+    "XLM": ("Stellar", "XLM-USD"), "XTZ": ("Tezos", "XTZ-USD"), "SHIB": ("Shiba Inu", "SHIB-USD"),
+    "APT": ("Aptos", "APT21794-USD"), "ALGO": ("Algorand", "ALGO-USD"),
+    "LBC": ("LBRY Credits", "LBC-USD"),
+}
+
+
+def read_watchlist(text: str) -> tuple[list[str], list[str]]:
+    """Split the master watchlist into (stocks, crypto). '#' lines are notes;
+    everything after a '# CRYPTO' heading is crypto."""
+    stocks: list[str] = []
+    crypto: list[str] = []
+    section = stocks
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("#"):
+            if line.upper().startswith("# CRYPTO"):
+                section = crypto
+            continue
+        section.extend(t.strip().upper() for t in line.replace(",", " ").split() if t.strip())
+    return list(dict.fromkeys(stocks)), list(dict.fromkeys(crypto))
+
+
+def crypto_snapshot(symbols: list[str], demo: bool = False) -> pd.DataFrame:
+    """Price and 24h / 7d / 30d change for each coin (crypto trades 24/7: no pre-market)."""
+    rows = []
+    for sym in symbols:
+        name, yahoo = CRYPTO.get(sym, (sym, f"{sym}-USD"))
+        d = daily_history(yahoo, period="3mo", demo=demo, fallback_demo=False)
+        c = d["Close"].dropna()
+        if c.empty:   # never show made-up prices for a coin with no real data
+            rows.append({"Coin": sym, "Name": name, "Price": np.nan, "24h %": np.nan,
+                         "7d %": np.nan, "30d %": np.nan})
+            continue
+
+        def chg(n):
+            return (c.iloc[-1] / c.iloc[-1 - n] - 1) * 100 if len(c) > n else np.nan
+
+        rows.append({"Coin": sym, "Name": name, "Price": float(c.iloc[-1]),
+                     "24h %": chg(1), "7d %": chg(7), "30d %": chg(30)})
+    return pd.DataFrame(rows)
+
+
 # Funds never report earnings; skip them in demo mode.
 ETFS = {"SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP",
         "XLU", "XLB", "XLRE", "XLC", "SMH", "SOXX", "ARKK", "TLT", "GLD", "SLV"}
@@ -145,20 +193,37 @@ def _uw_candles(ticker: str, size: str) -> pd.DataFrame | None:
         return None
 
 
-def daily_history(ticker: str, period: str = "5y", demo: bool = False) -> pd.DataFrame:
-    if not (demo or FORCE_DEMO) and yf is not None:
-        try:
-            df = yf.Ticker(ticker).history(period=period, auto_adjust=False)
-            if not df.empty:
-                df.index = df.index.tz_localize(None)
-                return df[["Open", "High", "Low", "Close", "Volume"]]
-        except Exception as e:  # noqa: BLE001
-            _warn(f"{ticker} daily: {e.__class__.__name__}")
+def _empty(tz) -> pd.DataFrame:
+    """No candles – but with a time index, so time-of-day code still works on it."""
+    return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"], dtype=float,
+                        index=pd.DatetimeIndex([], tz=tz))
+
+
+def _live(demo: bool) -> bool:
+    return not (demo or FORCE_DEMO)
+
+
+def daily_history(ticker: str, period: str = "5y", demo: bool = False,
+                  fallback_demo: bool = False) -> pd.DataFrame:
+    """Daily candles: Yahoo first, then Unusual Whales. In live mode a ticker with no real
+    data returns an EMPTY frame – never made-up numbers. Demo candles are only used when
+    Demo data is switched on."""
+    if _live(demo):
+        if yf is not None:
+            try:
+                df = yf.Ticker(ticker).history(period=period, auto_adjust=False)
+                if not df.empty:
+                    df.index = df.index.tz_localize(None)
+                    return df[["Open", "High", "Low", "Close", "Volume"]]
+            except Exception as e:  # noqa: BLE001
+                _warn(f"{ticker} daily: {e.__class__.__name__}")
         uwd = _uw_candles(ticker, "1d")
         if uwd is not None:
             uwd.index = uwd.index.tz_localize(None).normalize()
-            return uwd
-        _warn(f"{ticker}: live daily data unavailable – showing demo data")
+            return uwd[~uwd.index.duplicated(keep="last")]
+        if not fallback_demo:
+            _warn(f"{ticker}: no data – check the symbol")
+            return _empty(None)
     return _demo_daily(ticker)
 
 
@@ -185,7 +250,9 @@ def intraday(ticker: str, days: int = 5, interval: str = "5m",
         uwd = _uw_candles(ticker, interval) if days > 5 else None
         if uwd is not None:
             return uwd
-        _warn(f"{ticker}: live intraday data unavailable – showing demo data")
+    if _live(demo):
+        _warn(f"{ticker}: no intraday data – check the symbol")
+        return _empty(ET)
     return _demo_intraday(ticker, days)
 
 
@@ -237,13 +304,18 @@ def macro_snapshot(demo: bool = False) -> pd.DataFrame:
     for sym, name in MACRO.items():
         d = daily_history(sym, period="5d", demo=demo)
         i = intraday(sym, days=2, interval="5m", demo=demo)
+        if d.empty and i.empty:
+            continue
         last = i["Close"].iloc[-1] if len(i) else d["Close"].iloc[-1]
-        # If today's daily row already exists, prior close is the row before it.
-        has_today = d.index[-1].date() == now_et().date()
-        prev = d["Close"].iloc[-2] if has_today and len(d) > 1 else d["Close"].iloc[-1]
+        if d.empty:
+            prev = np.nan
+        else:
+            # If today's daily row already exists, prior close is the row before it.
+            has_today = d.index[-1].date() == now_et().date()
+            prev = d["Close"].iloc[-2] if has_today and len(d) > 1 else d["Close"].iloc[-1]
         rows.append({"Symbol": sym, "Name": name, "Last": last,
                      "Chg %": (last / prev - 1) * 100 if prev else np.nan})
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=["Symbol", "Name", "Last", "Chg %"])
 
 
 def next_earnings(ticker: str, demo: bool = False) -> dict:
@@ -258,7 +330,7 @@ def next_earnings(ticker: str, demo: bool = False) -> dict:
             return {"Ticker": ticker, "Date": None}
         except Exception as e:  # noqa: BLE001
             _warn(f"{ticker} earnings: {e.__class__.__name__}")
-    if ticker in ETFS:
+    if _live(demo) or ticker in ETFS:
         return {"Ticker": ticker, "Date": None}  # ETFs don't report
     rng = _rng(ticker, "earn")
     d = now_et().date() + dt.timedelta(days=int(rng.integers(1, 60)))
@@ -317,6 +389,8 @@ def past_earnings_dates(ticker: str, demo: bool = False) -> list[pd.Timestamp]:
                 return sorted(past)
         except Exception as e:  # noqa: BLE001
             _warn(f"{ticker} earnings history: {e.__class__.__name__}")
+    if _live(demo):
+        return []
     rng = _rng(ticker, "pastearn")
     out, d = [], now_et() - dt.timedelta(days=int(rng.integers(20, 80)))
     for _ in range(12):
@@ -334,7 +408,9 @@ def expirations(ticker: str, demo: bool = False) -> list[str]:
                 return exps
         except Exception as e:  # noqa: BLE001
             _warn(f"{ticker} options: {e.__class__.__name__}")
-        _warn(f"{ticker}: live option chain unavailable – showing demo chain")
+    if _live(demo):
+        _warn(f"{ticker}: no option chain available")
+        return []
     today = now_et().date()
     fridays = [today + dt.timedelta(days=(4 - today.weekday()) % 7 + 7 * k) for k in range(8)]
     leaps = [dt.date(today.year + y, 1, 15) for y in (1, 2, 3)]
@@ -361,6 +437,9 @@ def option_chain(ticker: str, expiry: str, spot: float, demo: bool = False) -> p
             return out
         except Exception as e:  # noqa: BLE001
             _warn(f"{ticker} chain {expiry}: {e.__class__.__name__}")
+    if _live(demo):
+        return pd.DataFrame(columns=["strike", "bid", "ask", "last", "iv", "volume", "oi", "type",
+                                     "mid", "expiry"])
     from analytics import bs_price  # local import avoids a cycle
     rng = _rng(ticker, expiry)
     T = max((pd.Timestamp(expiry).date() - now_et().date()).days, 1) / 365
