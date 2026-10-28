@@ -14,9 +14,11 @@ import streamlit as st
 
 import analytics as an
 import data
+import levels as lvl
 import patterns as pt
 import sectors as secs
 import session as ses
+import tvchart
 import uw
 
 ROOT = Path(__file__).parent
@@ -65,26 +67,66 @@ b.ok { color:#34d399; } b.off { color:#fbbf24; }
 # --------------------------------------------------------------------------- #
 # Sidebar
 # --------------------------------------------------------------------------- #
-default_wl = (ROOT / "watchlist.txt").read_text().split() if (ROOT / "watchlist.txt").exists() else ["SPY"]
+_master = (ROOT / "watchlist.txt").read_text() if (ROOT / "watchlist.txt").exists() else "SPY"
+default_wl, crypto_list = data.read_watchlist(_master)
 with st.sidebar:
     st.header("Settings")
-    wl_text = st.text_area("Watchlist (one per line)", "\n".join(default_wl), height=220)
-    tickers = [t.strip().upper() for t in wl_text.replace(",", "\n").split() if t.strip()]
+    wl_text = st.text_area("Watchlist (one per line)", "\n".join(default_wl), height=220,
+                           help="Every page uses these tickers, except Sectors (S&P 500 list).")
+    st.caption(
+        "**How to use:** type one ticker per line (e.g. `NVDA`), or separate with commas. "
+        "Click outside the box to update every page.  \n"
+        "⚠️ Changes here are **temporary** – they reset when the page reloads. "
+        "To change the list **permanently**, edit `watchlist.txt` on GitHub "
+        "(open the file → ✏️ pencil → edit → **Commit changes**).")
+    tickers = data.read_watchlist(wl_text)[0]
     demo = st.toggle("Demo data (offline)", value=os.environ.get("DASH_DEMO") == "1",
                      help="Synthetic prices – use to test the layout without internet.")
     data.FORCE_DEMO = demo
-    st.subheader("Swing parameters")
-    stop_atr = st.slider("Stop (× ATR)", 0.5, 3.0, 1.5, 0.25)
-    target_atr = st.slider("Target (× ATR)", 1.0, 6.0, 3.0, 0.25)
-    max_days = st.slider("Max holding days", 3, 40, 15)
-    rate = st.number_input("Risk-free rate", 0.0, 0.10, 0.04, 0.005, format="%.3f")
+    st.subheader("Swing parameters", help="These settings drive the **📈 Swing Odds** page: where the stop "
+                 "and target sit for each setup, and how long a trade may run. Changing them re-tests every "
+                 "setup over ~5 years of history, so the win probabilities update.")
+    stop_atr = st.slider(
+        "Stop (× ATR)", 0.5, 3.0, 1.5, 0.25,
+        help="**How far below entry the stop-loss sits**, measured in ATR (the stock's average daily range).\n\n"
+             "Example: ATR = \\$2 and Stop = 1.5 → stop is \\$3 below entry.\n\n"
+             "**Wider stop** (move right) = fewer stop-outs, so win rates go **up**, but each loss is bigger. "
+             "**Tighter stop** (move left) = smaller losses, but more trades get stopped out.")
+    target_atr = st.slider(
+        "Target (× ATR)", 1.0, 6.0, 3.0, 0.25,
+        help="**How far above entry the profit target sits**, in ATR.\n\n"
+             "Example: ATR = \\$2 and Target = 3 → target is \\$6 above entry.\n\n"
+             "**Closer target** (move left) = reached more often, so win rates go **up**, but each win is "
+             "smaller. Target ÷ Stop = your reward-to-risk (3 ÷ 1.5 = 2 : 1).")
+    max_days = st.slider(
+        "Max holding days", 3, 40, 15,
+        help="**How many trading days a swing trade may stay open.** If neither the stop nor the target is "
+             "hit in that time, the trade 'times out' and counts as **not a win** in the win probability.\n\n"
+             "Longer = more time for the target to be reached (win rates usually go up). "
+             "Shorter = faster trades.")
+    rate = st.number_input(
+        "Risk-free rate", 0.0, 0.10, 0.04, 0.005, format="%.3f",
+        help="**Used only on the 🎯 Options & LEAPS page** to price options (the interest you could earn "
+             "risk-free, e.g. on Treasury bills). 0.040 = 4%. Small changes barely affect results – "
+             "leave it near the current T-bill rate.")
     st.subheader("Live mode")
     live = st.toggle("Auto-refresh", value=False,
-                     help="Re-pulls pre-market quotes and Unusual Whales panels on a timer.")
+                     help="**On** = the live tables and charts (pre-market, key levels, PM → Close, charts, "
+                          "options flow) reload by themselves on a timer. **Off** = they update only when you "
+                          "reload the page or press 🔄 Refresh all data.")
     refresh_s = st.select_slider("Every", [10, 15, 30, 60, 120], value=30,
-                                 format_func=lambda s: f"{s}s", disabled=not live)
+                                 format_func=lambda s: f"{s}s", disabled=not live,
+                                 help="How often Auto-refresh reloads. 30s is a good balance; very short "
+                                      "intervals use more of your Unusual Whales request allowance.")
     run_every = refresh_s if live else None
-    if st.button("🔄 Refresh all data", width="stretch"):
+    st.subheader("Charts")
+    candle_style = st.radio("Candle style", ["Filled", "Hollow", "Heikin Ashi"], horizontal=True,
+                            key="candle_style",
+                            help="Filled = solid candles. Hollow = up candles hollow, down candles filled. "
+                                 "Heikin Ashi = smoothed candles that make trends easier to see "
+                                 "(their open/close are averages, not actual prices).")
+    if st.button("🔄 Refresh all data", width="stretch",
+                 help="Throw away everything saved in memory and pull fresh data for every page now."):
         st.cache_data.clear()
         data.WARNINGS.clear()
     st.caption("Prices: Yahoo Finance (can be delayed). Flow: Unusual Whales (with key). "
@@ -97,6 +139,11 @@ with st.sidebar:
 @st.cache_data(ttl=10, show_spinner=False)
 def load_premarket(tks: tuple, demo: bool):
     return data.premarket_snapshot(list(tks), demo=demo)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_crypto(symbols: tuple, demo: bool) -> pd.DataFrame:
+    return data.crypto_snapshot(list(symbols), demo=demo)
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -131,8 +178,12 @@ def load_expirations(t: str, demo: bool):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_swing(tks: tuple, demo: bool, stop_atr, target_atr, max_days):
-    return [an.swing_scan(t, data.daily_history(t, demo=demo), stop_atr, target_atr, max_days)
-            for t in tks]
+    out = []
+    for t in tks:
+        d = data.daily_history(t, demo=demo)
+        if len(d) >= 60:   # skip tickers with no (or too little) real data
+            out.append(an.swing_scan(t, d, stop_atr, target_atr, max_days))
+    return out
 
 
 @st.cache_data(ttl=10, show_spinner=False)
@@ -161,6 +212,91 @@ def load_patterns(tks: tuple, demo: bool, timeframe: str):
         found += today_found
         stats[t] = st_df
     return found, stats
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def load_bars(t: str, tf: str, demo: bool, custom: tuple | None = None) -> pd.DataFrame:
+    """Candles for a timeframe button, or for a custom (start, end, candle size) range."""
+    if tf == "Custom" and custom:
+        start, end, candle = custom
+        src, rule, _ = lvl.CUSTOM_CANDLES[candle]
+        span = None
+    else:
+        src, rule, span = lvl.TIMEFRAMES[tf]
+    if src == "daily":
+        df = data.daily_history(t, demo=demo)
+    elif src == "dailymax":
+        df = data.daily_history(t, period="max", demo=demo)
+    else:
+        interval, days = {"1m": ("1m", 2), "1m7": ("1m", 7), "5m": ("5m", 5), "5m60": ("5m", 60)}[src]
+        df = data.intraday(t, days=days, interval=interval, demo=demo)
+    if rule:
+        df = lvl.resample(df, rule)
+    if len(df):
+        df = tvchart.add_indicators(df)   # EMA 9 / EMA 200 / MACD on full history, then trim
+    if span is None:
+        d = df.index.date
+        return df[(d >= start) & (d <= end)]
+    return lvl.window(df, span)
+
+
+def tf_picker(key: str, default: str = "5m") -> tuple[str, tuple | None]:
+    """Timeframe buttons shown above every price chart; 'Custom' opens a date range."""
+    opts = list(lvl.TIMEFRAMES) + ["Custom"]
+    tf = st.radio("Timeframe", opts, index=opts.index(default), horizontal=True, key=key)
+    if tf != "Custom":
+        return tf, None
+    today = data.now_et().date()
+    c1, c2, c3 = st.columns(3)
+    start = c1.date_input("From", today - dt.timedelta(days=30), key=f"{key}_from", format="DD/MM/YYYY")
+    end = c2.date_input("To", today, key=f"{key}_to", format="DD/MM/YYYY")
+    candle = c3.selectbox("Candle size", list(lvl.CUSTOM_CANDLES), index=list(lvl.CUSTOM_CANDLES).index("Daily"),
+                          key=f"{key}_candle")
+    reach = lvl.CUSTOM_CANDLES[candle][2]
+    if reach and (today - start).days > reach:
+        st.caption(f"ℹ️ {candle} candles only go back about {reach} days – earlier dates will be empty. "
+                   "Use 1h, Daily or Weekly for longer ranges.")
+    if start > end:
+        st.warning("'From' is after 'To' – swap the dates.")
+    return tf, (start, end, candle)
+
+
+def is_intraday(tf: str, custom: tuple | None) -> bool:
+    return tf in lvl.INTRADAY or (tf == "Custom" and bool(custom) and custom[2] in lvl.INTRADAY)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def load_levels(t: str, demo: bool) -> dict | None:
+    """Key levels for a ticker, or None when it has no data."""
+    try:
+        return lvl.ticker_levels(data.intraday(t, days=5, interval="5m", demo=demo),
+                                 data.daily_history(t, demo=demo))
+    except ValueError:
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_long_sr(t: str, demo: bool, weekly: bool) -> list:
+    return lvl.long_term_sr(data.daily_history(t, demo=demo), weekly)
+
+
+def pretty_dates(df: pd.DataFrame) -> pd.DataFrame:
+    """Show date/time columns as 28/Oct/2026 (and 28/Oct/2026 09:45 when there's a time)."""
+    df = df.copy()
+    for c in df.columns:
+        name = str(c).lower()
+        if not any(k in name for k in ("date", "time", "_at", "expir", "day_of")) or name in ("time (et)",):
+            continue
+        if pd.api.types.is_numeric_dtype(df[c]) or pd.api.types.is_bool_dtype(df[c]):
+            continue
+        ts = pd.to_datetime(df[c], errors="coerce", utc=False)
+        if ts.notna().sum() == 0 or ts.notna().sum() < df[c].notna().sum():
+            continue
+        has_time = (ts.dropna().dt.hour.fillna(0) + ts.dropna().dt.minute.fillna(0)).any()
+        if has_time and getattr(ts.dt, "tz", None) is not None:
+            ts = ts.dt.tz_convert("America/New_York")
+        df[c] = ts.dt.strftime(lvl.DATETIME_FMT if has_time else lvl.DATE_FMT).fillna("—")
+    return df
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -194,8 +330,16 @@ def first_col(df: pd.DataFrame, *names):
 
 
 def last_price(t: str) -> float:
+    """Latest price, or NaN when the ticker has no data."""
     i = load_intraday(t, demo, days=2)
-    return float(i["Close"].iloc[-1]) if len(i) else float(load_daily(t, demo)["Close"].iloc[-1])
+    if len(i):
+        return float(i["Close"].iloc[-1])
+    d = load_daily(t, demo)
+    return float(d["Close"].iloc[-1]) if len(d) else float("nan")
+
+
+def no_data(t: str) -> None:
+    st.warning(f"**{t}**: no data – check the symbol (it may be misspelled or not covered by the data feed).")
 
 
 def bias_color(v):
@@ -209,17 +353,148 @@ def signed_color(v):
 
 
 def candles(df: pd.DataFrame, name="Price") -> go.Candlestick:
+    """Candles in the style picked in the sidebar (Filled / Hollow / Heikin Ashi)."""
+    if candle_style == "Heikin Ashi":
+        df = an.heikin_ashi(df)
+        name = f"{name} (Heikin Ashi)"
+    up_fill = "rgba(0,0,0,0)" if candle_style == "Hollow" else UP
     return go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"],
                           close=df["Close"], name=name, increasing_line_color=UP,
-                          decreasing_line_color=DOWN, increasing_line_width=1,
+                          decreasing_line_color=DOWN, increasing_fillcolor=up_fill,
+                          decreasing_fillcolor=DOWN, increasing_line_width=1,
                           decreasing_line_width=1)
 
 
-def style_fig(fig: go.Figure, height=480) -> go.Figure:
+def style_fig(fig: go.Figure, height=480, intraday: bool | None = None) -> go.Figure:
     fig.update_layout(height=height, margin=dict(l=10, r=10, t=30, b=10),
                       xaxis_rangeslider_visible=False, hovermode="x unified",
                       legend=dict(orientation="h", y=1.06, x=0))
+    if intraday is True:
+        fig.update_xaxes(tickformat="%H:%M<br>%d/%b/%Y", hoverformat=lvl.DATETIME_FMT)
+    elif intraday is False:
+        fig.update_xaxes(tickformat=lvl.DATE_FMT, hoverformat=lvl.DATE_FMT)
     return fig
+
+
+HIGH_PROB = 0.65      # Swing Odds: "high probability" cut-off
+MIN_SIGNALS = 10      # ...and how many past occurrences that needs to count
+
+LEVEL_STYLE = {
+    "PMH": ("Pre-market high", SERIES[1], "dash"), "PML": ("Pre-market low", SERIES[1], "dash"),
+    "ORH": ("Opening range high", SERIES[2], "dash"), "ORL": ("Opening range low", SERIES[2], "dash"),
+    "PDH": ("Prior day high", MUTED, "dot"), "PDL": ("Prior day low", MUTED, "dot"),
+    "PDC": ("Prior day close", MUTED, "dot"), "R1": ("Resistance 1 (pivot)", MUTED, "dashdot"),
+    "S1": ("Support 1 (pivot)", MUTED, "dashdot"),
+}
+# Legend for the Day Trading levels table: key -> (full name, what it means for a trade)
+LEVEL_INFO = {
+    "PMH": ("Pre-market high", "Highest price 4:00–9:29 AM. Often resistance after the open; a break above it is bullish."),
+    "PML": ("Pre-market low", "Lowest price 4:00–9:29 AM. Often support; a break below it is bearish."),
+    "ORH": ("Opening range high", "Highest price 9:30–10:00. A move above it after 10:00 = breakout (bullish)."),
+    "ORL": ("Opening range low", "Lowest price 9:30–10:00. A move below it after 10:00 = breakdown (bearish)."),
+    "PDH": ("Prior day high", "Yesterday's high. Common resistance; clearing it shows strength."),
+    "PDL": ("Prior day low", "Yesterday's low. Common support; losing it shows weakness."),
+    "PDC": ("Prior day close", "Yesterday's close. Today's gap is measured from here; gaps often drift back toward it."),
+    "Pivot": ("Pivot point", "(Yesterday's high + low + close) ÷ 3. Trading above it leans bullish, below leans bearish."),
+    "R1": ("Resistance 1 (pivot)", "First upside level from pivot math – a common first profit target for longs."),
+    "R2": ("Resistance 2 (pivot)", "Second, stronger upside level – reached on strong trend days."),
+    "S1": ("Support 1 (pivot)", "First downside level from pivot math – a common first target for shorts."),
+    "S2": ("Support 2 (pivot)", "Second, stronger downside level – reached on strong selling days."),
+}
+LEVEL_GROUPS = {
+    "Pre-market high/low": ["PMH", "PML"],
+    "Opening range 9:30–10:00": ["ORH", "ORL"],
+    "Prior day high/low/close": ["PDH", "PDL", "PDC"],
+    "Pivots": ["R1", "S1"],
+    "Support / resistance": [],
+}
+
+
+def price_chart(t: str, tf: str, groups: list[str], *, key: str, height: int = 430,
+                custom: tuple | None = None, extra_levels=(), extra_lines=(), note_prefix: str = "") -> None:
+    """Touch chart for one ticker: candles + EMA 9 / EMA 200 / volume / MACD, plus key levels."""
+    bars = load_bars(t, tf, demo, custom)
+    label = f"{custom[2]} · {lvl.fmt_date(custom[0])} – {lvl.fmt_date(custom[1])}" if tf == "Custom" and custom else tf
+    intraday = is_intraday(tf, custom)
+    if bars.empty:
+        tvchart.render(bars, key=key, title=f"{t} · {label}")
+        return
+    lo, hi = float(bars["Low"].min()), float(bars["High"].max())
+    span = max(hi - lo, hi * 0.002)
+    raw: list[tuple] = []          # (price, title, color, style)
+    notes: list[str] = []
+    markers: list[dict] = []
+
+    def add(y, text, color, dash):
+        if lo - 0.6 * span <= y <= hi + 0.6 * span:     # skip levels far off the chart
+            raw.append((float(y), text, color, dash))
+
+    L = load_levels(t, demo) if intraday else None
+    if L is not None:
+        for g in groups:
+            for k in LEVEL_GROUPS[g]:
+                if k not in L["levels"]:
+                    continue
+                name, color, dash = LEVEL_STYLE[k]
+                if k in ("ORH", "ORL") and not L["orb_locked"]:
+                    name += " (forming)"
+                if k in ("PMH", "PML") and not L["pm_locked"]:
+                    name += " (live)"
+                add(L["levels"][k], name, color, dash)
+        sr_res, sr_sup = L["resistance"], L["support"]
+        if "Opening range 9:30–10:00" in groups:
+            first = bars.index[0]
+            markers = [{"time": b["time"], "up": b["side"] == "up",
+                        "text": f"OR break {'up' if b['side'] == 'up' else 'down'}"}
+                       for b in L["breaks"] if b["time"] >= first]
+            if L["breaks"]:
+                notes.append("OR break: " + ", ".join(f"{b['side']} {b['time']:%H:%M}" for b in L["breaks"]))
+            elif L["orb_locked"]:
+                notes.append("OR: no break yet")
+        lvls = L["levels"]
+        if "PMH" in lvls:
+            notes.insert(0, f"PM {lvls['PMH']:,.2f} / {lvls['PML']:,.2f}" + ("" if L["pm_locked"] else " (live)"))
+        if "ORH" in lvls:
+            notes.insert(1, f"OR {lvls['ORH']:,.2f} / {lvls['ORL']:,.2f}"
+                         + (" (locked)" if L["orb_locked"] else " (forming)"))
+    elif intraday:
+        sr_res, sr_sup = [], []
+    else:
+        sr = load_long_sr(t, demo, tf in ("Weekly", "Max") or (custom is not None and custom[2] == "Weekly"))
+        sr_res, sr_sup = lvl.nearest_sr(sr, float(bars["Close"].iloc[-1]), n=3)
+    if "Support / resistance" in groups:
+        for r in sr_res:
+            add(r["price"], f"Resistance ({r['touches']}×)", DOWN, "dot")
+        for x in sr_sup:
+            add(x["price"], f"Support ({x['touches']}×)", UP, "dot")
+        if sr_res:
+            notes.append("R " + ", ".join(f"{r['price']:,.2f}" for r in sr_res))
+        if sr_sup:
+            notes.append("S " + ", ".join(f"{x['price']:,.2f}" for x in sr_sup))
+    for lv_ in extra_levels:
+        raw.append((float(lv_["price"]), lv_["title"], lv_.get("color", MUTED), lv_.get("style", "dash")))
+
+    # Levels too close to read apart share one label (the others draw as plain lines).
+    gap = 0.02 * (max([hi] + [r[0] for r in raw]) - min([lo] + [r[0] for r in raw]))
+    levels, group = [], []
+    for item in sorted(raw) + [None]:
+        if item is not None and group and item[0] - group[-1][0] <= gap:
+            group.append(item)
+            continue
+        if group:
+            title = " · ".join(g[1] for g in reversed(group))
+            for n, (y, _, color, dash) in enumerate(reversed(group)):
+                levels.append({"price": y, "title": title if n == 0 else "", "color": color,
+                               "style": dash, "label": n == 0})
+        group = [item] if item is not None else []
+
+    if candle_style == "Heikin Ashi":
+        bars = bars.copy()
+        bars[["Open", "High", "Low", "Close"]] = an.heikin_ashi(bars[["Open", "High", "Low", "Close"]])
+        label += " · Heikin Ashi"
+    tvchart.render(bars, key=key, title=f"{t} · {label}", height=height, intraday=intraday,
+                   style=candle_style, levels=levels, markers=markers, lines=extra_lines,
+                   note=" · ".join(([note_prefix] if note_prefix else []) + notes))
 
 
 # --------------------------------------------------------------------------- #
@@ -267,14 +542,45 @@ st.markdown(f"""
   </div>
   <div class="status">
     <div class="pill">{feed}</div>
-    <div class="pill">NY {now:%a %H:%M} · {status}{(" · " + status_note) if status_note else ""}</div>
+    <div class="pill">NY {now:%a %d/%b/%Y %H:%M} · {status}{(" · " + status_note) if status_note else ""}</div>
   </div>
 </div>
 """, unsafe_allow_html=True)
 
-tabs = st.tabs(["🌅 Pre-Market", "🗂️ Sectors", "🧭 PM → Close", "📐 Setups & Patterns",
-                "🐋 Options Flow", "🎯 Options & LEAPS", "📅 Earnings", "📈 Swing Odds",
-                "⚡ Day Trading", "🧩 My Scripts"])
+SECTIONS = ["🌅 Pre-Market", "📊 Charts & Levels", "🗂️ Sectors", "🧭 PM → Close", "📐 Setups & Patterns",
+            "🐋 Options Flow", "🎯 Options & LEAPS", "📅 Earnings", "📈 Swing Odds",
+            "⚡ Day Trading", "🧩 My Scripts"]
+
+
+def _jump():
+    """Remember which section was picked, then clear the menu so it's ready for the next jump."""
+    st.session_state["jump_to"] = st.session_state.get("section_menu")
+    st.session_state["section_menu"] = None
+
+
+st.selectbox("Go to section", SECTIONS, index=None, key="section_menu", on_change=_jump,
+             placeholder="☰  Jump to a section…", label_visibility="collapsed")
+tabs = st.tabs(SECTIONS)
+target = st.session_state.pop("jump_to", None)
+if target in SECTIONS:
+    # Streamlit can't switch tabs from Python, so a tiny script clicks the matching header tab.
+    import streamlit.components.v1 as _components
+    _components.html(f"""<script>
+      const want = {SECTIONS.index(target)};
+      const go = (n) => {{
+        // first tab bar on the page = the header tabs (works for both old and new Streamlit tab markup)
+        const bar = window.parent.document.querySelector('[role="tablist"]');
+        const tabs = bar ? bar.querySelectorAll('[role="tab"]') : [];
+        if (tabs.length > want) {{
+          const t = tabs[want];
+          t.dispatchEvent(new PointerEvent('pointerdown', {{bubbles: true, pointerType: 'mouse'}}));
+          t.dispatchEvent(new PointerEvent('pointerup', {{bubbles: true, pointerType: 'mouse'}}));
+          t.click();
+          t.scrollIntoView({{block: "nearest", inline: "center"}});
+        }} else if (n < 30) setTimeout(() => go(n + 1), 100);
+      }};
+      go(0);
+    </script>""", height=0)
 
 # --------------------------------------------------------------------------- #
 # 1. Pre-market
@@ -288,6 +594,18 @@ with tabs[0]:
         fmt = f"{r['Last']:,.2f}" if r["Last"] < 1000 else f"{r['Last']:,.0f}"
         cols[i % 5].metric(r["Name"], fmt, f"{r['Chg %']:+.2f}%" if pd.notna(r["Chg %"]) else None,
                            delta_color="inverse" if r["Symbol"] in ("^VIX", "^TNX") else "normal")
+
+    if crypto_list:
+        with st.expander(f"🪙 Crypto ({len(crypto_list)}) – ✅ Recognized by SEC and CFTC", expanded=False):
+            st.caption("Digital commodities named in the SEC/CFTC release. Crypto trades 24/7, so there "
+                       "is no pre-market or opening range – changes are vs. 24 hours, 7 and 30 days ago. "
+                       "Edit this list in the CRYPTO section of `watchlist.txt`.")
+            cx = load_crypto(tuple(crypto_list), demo)
+            st.dataframe(cx.style.format({"Price": lambda v: "—" if pd.isna(v) else f"{v:,.6f}" if v < 0.01
+                                          else f"{v:,.4f}" if v < 1 else f"{v:,.2f}", "24h %": "{:+.2f}%", "7d %": "{:+.2f}%",
+                                          "30d %": "{:+.2f}%"}, na_rep="—")
+                         .map(signed_color, subset=["24h %", "7d %", "30d %"]),
+                         hide_index=True, width="stretch")
 
     @st.fragment(run_every=run_every)
     def watchlist_gaps():
@@ -323,25 +641,79 @@ with tabs[0]:
                               margin=dict(l=10, r=10, t=40, b=10), xaxis_ticksuffix="%")
             st.plotly_chart(fig, width="stretch", theme="streamlit")
 
-        if live:
-            st.caption(f"Live · updated {data.now_et():%H:%M:%S} ET")
+        sess = pd.to_datetime(pd.Series(load_today(tuple(tickers), demo).get("Session date", pd.Series(dtype=object))),
+                              errors="coerce").dropna()
+        today_et = data.now_et().date()
+        if len(sess):
+            latest = sess.max().date()
+            st.caption(f"Data for **{lvl.fmt_date(latest)}** · updated {data.now_et():%H:%M:%S} ET"
+                       + (" · auto-refresh on" if live else " · turn on Auto-refresh in the sidebar for live updates"))
+            if latest < today_et and data.now_et().weekday() < 5 and data.now_et().hour >= 4:
+                st.warning(f"These numbers are from {lvl.fmt_date(latest)}, not today. Today's candles "
+                           "haven't arrived yet – refresh in a minute, or check the UW FEED badge.")
 
     watchlist_gaps()
 
-    pick = st.selectbox("Pre-market chart", tickers, key="pm_pick")
-    intra = load_intraday(pick, demo, days=2)
-    if len(intra):
-        today = intra[intra.index.date == intra.index.date[-1]]
-        fig = go.Figure(candles(today, pick))
-        fig.add_vrect(x0=today.index[0], x1=today.index[0].replace(hour=9, minute=30),
-                      fillcolor=MUTED, opacity=0.08, line_width=0,
-                      annotation_text="pre-market", annotation_position="top left")
-        st.plotly_chart(style_fig(fig, 420), width="stretch", theme="streamlit")
+    st.subheader("Key levels – set automatically for every watchlist ticker")
+    st.caption("Pre-market high/low lock at 9:30 · opening range (9:30–10:00) locks at 10:00 · "
+               "Resistance/Support = nearest daily swing levels (× = how many times price turned there).")
+
+    @st.fragment(run_every=run_every)
+    def key_levels_table():
+        rows = []
+        for t in tickers:
+            L = load_levels(t, demo)
+            if L is None:
+                rows.append({"Ticker": t, "OR status": "No data – check the symbol"})
+                continue
+            v = L["levels"]
+            brk = ", ".join(f"{'Up' if b['side'] == 'up' else 'Down'} {b['time']:%H:%M}" for b in L["breaks"])
+            rows.append({
+                "Ticker": t, "Price": L["price"],
+                "PM high": v.get("PMH"), "PM low": v.get("PML"),
+                "OR high": v.get("ORH"), "OR low": v.get("ORL"),
+                "OR status": ("—" if "ORH" not in v else "Forming" if not L["orb_locked"]
+                              else (brk or "No break")),
+                "Prev high": v.get("PDH"), "Prev low": v.get("PDL"), "Prev close": v.get("PDC"),
+                "Resistance 1": L["resistance"][0]["price"] if L["resistance"] else None,
+                "Resistance 2": L["resistance"][1]["price"] if len(L["resistance"]) > 1 else None,
+                "Support 1": L["support"][0]["price"] if L["support"] else None,
+                "Support 2": L["support"][1]["price"] if len(L["support"]) > 1 else None,
+            })
+        kl = pd.DataFrame(rows)
+        num = [c for c in kl.columns if c not in ("Ticker", "OR status")]
+        st.dataframe(kl.style.format({c: "{:,.2f}" for c in num}, na_rep="—"),
+                     hide_index=True, width="stretch", height=min(38 * (len(kl) + 1), 640))
+
+    key_levels_table()
+    st.caption("Charts with these lines drawn in: **📊 Charts & Levels** tab.")
+
+# --------------------------------------------------------------------------- #
+# 0b. Multi-ticker charts with levels
+# --------------------------------------------------------------------------- #
+with tabs[1]:
+    picks = st.multiselect("Tickers", tickers, default=tickers[:4], max_selections=8, key="chart_picks")
+    tf, custom = tf_picker("chart_tf", "5m")
+    groups = st.multiselect("Lines", list(LEVEL_GROUPS), default=list(LEVEL_GROUPS), key="chart_groups")
+    if not is_intraday(tf, custom):
+        st.caption("Daily and longer charts show longer-term support & resistance. Pre-market and "
+                   "opening-range lines appear on the 1-minute to 1-hour timeframes.")
+    if not picks:
+        st.info("Pick at least one ticker.")
+
+    @st.fragment(run_every=run_every)
+    def chart_grid():
+        cols = st.columns(2)
+        for i, t in enumerate(picks):
+            with cols[i % 2]:
+                price_chart(t, tf, groups, custom=custom, key=f"grid_{t}_{tf}")
+
+    chart_grid()
 
 # --------------------------------------------------------------------------- #
 # 1. Sectors: every S&P 500 sector, pre-market scan + company lookup
 # --------------------------------------------------------------------------- #
-with tabs[1]:
+with tabs[2]:
     try:
         sp = load_sp500()
     except Exception as e:  # noqa: BLE001
@@ -425,7 +797,7 @@ with tabs[1]:
 # --------------------------------------------------------------------------- #
 # 1a. Pre-market setup vs what happened by the afternoon
 # --------------------------------------------------------------------------- #
-with tabs[2]:
+with tabs[3]:
     st.caption("Your pre-market rules: **PM bias** = last pre-market price vs pre-market VWAP. "
                "**Opening range** = 9:30–10:00. **Behavior** compares the price after 10:00 with "
                "the opening range. **Afternoon** = 1:00–4:00 PM.")
@@ -502,17 +874,18 @@ with tabs[2]:
         st.plotly_chart(fig, width="stretch", theme="streamlit")
         show = [c for c in ("Date", "PM bias", "Gap %", "ORB break", "Behavior", "Took PM high", "Took PM low",
                             "Morning %", "Afternoon %", "Afternoon followed PM?") if c in h.columns]
-        st.dataframe(h[show].iloc[::-1].style.format({"Gap %": "{:+.2f}%", "Morning %": "{:+.2f}%",
+        st.dataframe(h[show].iloc[::-1].assign(Date=lambda x: x["Date"].map(lvl.fmt_date)).style.format({"Gap %": "{:+.2f}%", "Morning %": "{:+.2f}%",
                                                       "Afternoon %": "{:+.2f}%"}, na_rep="—")
                      .map(bias_color, subset=["PM bias"]), hide_index=True, width="stretch")
 
 # --------------------------------------------------------------------------- #
 # 1b. Chart patterns / setups
 # --------------------------------------------------------------------------- #
-with tabs[3]:
+with tabs[4]:
     c1, c2, c3 = st.columns([1, 1, 2])
-    tf = c1.radio("Timeframe", ["Daily", "5-minute"], horizontal=True,
-                  help="Daily = swing setups. 5-minute = intraday setups (regular hours, last 60 days).")
+    tf = c1.radio("Scan on", ["Daily", "5-minute"], horizontal=True,
+                  help="Which candles the pattern scanner looks at. Daily = swing setups. "
+                       "5-minute = intraday setups (regular hours, last 60 days).")
     bias_f = c2.multiselect("Bias", ["Bullish", "Bearish", "Neutral"],
                             default=["Bullish", "Bearish", "Neutral"])
     with st.spinner("Scanning patterns…"):
@@ -543,24 +916,25 @@ with tabs[3]:
                      hide_index=True, width="stretch", height=min(38 * (len(fd) + 1), 600))
 
     pk = st.selectbox("Chart", tickers, key="pat_pick")
-    if tf == "Daily":
-        cd = data.daily_history(pk, demo=demo).tail(150)
-    else:
-        cd = data.intraday(pk, days=5, interval="5m", demo=demo)
-        m = cd.index.hour * 60 + cd.index.minute
-        cd = cd[(m >= 570) & (m < 960)]
+    ctf, ccustom = tf_picker("pat_tf", "Daily" if tf == "Daily" else "5m")
     mine = [f for f in found if f["Ticker"] == pk]
-    fig = go.Figure([candles(cd, pk)])
-    for f in mine:
-        for x0, y0, x1, y1, lbl in pt.pattern_lines(cd, f["Pattern"]):
-            fig.add_trace(go.Scatter(x=[x0, x1], y=[y0, y1], mode="lines", name=f"{f['Pattern']} ({lbl})",
-                                     line=dict(color=SERIES[0] if lbl == "upper" else SERIES[1],
-                                               width=2, dash="dash")))
-    if tf != "Daily":
-        fig.update_xaxes(rangebreaks=[dict(bounds=[16, 9.5], pattern="hour"), dict(bounds=["sat", "mon"])])
-    else:
-        fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
-    st.plotly_chart(style_fig(fig, 480), width="stretch", theme="streamlit")
+    pat_lines = []
+    # Pattern lines belong to the candles they were found on, so only draw them on that timeframe.
+    if (tf == "Daily" and ctf == "Daily") or (tf == "5-minute" and ctf == "5m"):
+        src = data.daily_history(pk, demo=demo).tail(150) if tf == "Daily" else load_bars(pk, ctf, demo, ccustom)
+        if tf != "Daily":
+            mm = src.index.hour * 60 + src.index.minute
+            src = src[(mm >= 570) & (mm < 960)]
+        for f in mine:
+            for x0, y0, x1, y1, lbl in pt.pattern_lines(src, f["Pattern"]):
+                pat_lines.append({"points": [(x0, y0), (x1, y1)], "style": "dash",
+                                  "color": "#38bdf8" if lbl == "upper" else "#fb923c",
+                                  "title": f"{f['Pattern']} ({lbl})"})
+    elif mine:
+        st.caption(f"Pattern lines are drawn on the {'Daily' if tf == 'Daily' else '5m'} timeframe "
+                   "(the candles the scan used).")
+    price_chart(pk, ctf, ["Support / resistance"], key=f"pat_{pk}_{ctf}", custom=ccustom,
+                extra_lines=pat_lines)
     if mine:
         st.write("Present now: " + ", ".join(f"**{f['Pattern']}** ({f['Bias'].lower()})" for f in mine))
     if pk in pstats:
@@ -574,7 +948,7 @@ with tabs[3]:
 # --------------------------------------------------------------------------- #
 # 1c. Unusual Whales (real-time flow, dark pool, GEX, market tide)
 # --------------------------------------------------------------------------- #
-with tabs[4]:
+with tabs[5]:
     if not uw.api_key():
         st.info("**Connect Unusual Whales:** on the hosted site, open the app's **Settings → Secrets** "
                 "and add `UW_API_KEY = \"your_key\"`. Running on your Mac, it reads the key from "
@@ -599,7 +973,8 @@ with tabs[4]:
                     col = first_col(mp, "max_pain")
                     if col:
                         c2.metric("Max pain (nearest expiry)", f"{float(mp[col].iloc[0]):,.2f}")
-                c3.metric("Price", f"{last_price(ot):,.2f}")
+                px = last_price(ot)
+                c3.metric("Price", "—" if pd.isna(px) else f"{px:,.2f}")
                 st.markdown("**Today's options volume & premium**")
                 ov = uw_panel("options_volume", ticker=ot)
                 if ov is not None and len(ov):
@@ -607,13 +982,13 @@ with tabs[4]:
                 st.markdown(f"**Flow alerts – {ot}**")
                 fa = uw_panel("flow_alerts", {"ticker_symbol": ot, "limit": 100})
                 if fa is not None and len(fa):
-                    st.dataframe(fa, hide_index=True, width="stretch", height=380)
+                    st.dataframe(pretty_dates(fa), hide_index=True, width="stretch", height=380)
                 else:
                     st.write("No flow alerts for this ticker today.")
                 st.markdown(f"**Recent trades – {ot}**")
                 fr = uw_panel("flow_ticker", ticker=ot)
                 if fr is not None and len(fr):
-                    st.dataframe(fr.head(200), hide_index=True, width="stretch", height=380)
+                    st.dataframe(pretty_dates(fr.head(200)), hide_index=True, width="stretch", height=380)
 
             ticker_options()
 
@@ -655,7 +1030,7 @@ with tabs[4]:
                 lead = [c for c in ("created_at", tcol, kcol, "strike", "expiry", pcol,
                                     "total_size", "volume", "open_interest", "underlying_price",
                                     "alert_rule", "has_sweep") if c and c in df.columns]
-                st.dataframe(df[lead + [c for c in df.columns if c not in lead]],
+                st.dataframe(pretty_dates(df[lead + [c for c in df.columns if c not in lead]]),
                              hide_index=True, width="stretch", height=480)
                 st.caption(f"{len(df)} alerts · updated {data.now_et():%H:%M:%S} ET")
 
@@ -677,8 +1052,8 @@ with tabs[4]:
                                                  line=dict(color=color, width=2)))
                     fig.update_layout(title="Market tide – net premium flowing into calls vs puts",
                                       yaxis_tickprefix="$")
-                    st.plotly_chart(style_fig(fig, 420), width="stretch", theme="streamlit")
-                st.dataframe(df.tail(50), hide_index=True, width="stretch")
+                    st.plotly_chart(style_fig(fig, 420, intraday=True), width="stretch", theme="streamlit")
+                st.dataframe(pretty_dates(df.tail(50)), hide_index=True, width="stretch")
 
             market_tide()
 
@@ -695,7 +1070,7 @@ with tabs[4]:
                 pcol = first_col(df, "premium")
                 if pcol:
                     df = df.sort_values(pcol, ascending=False)
-                st.dataframe(df, hide_index=True, width="stretch", height=520)
+                st.dataframe(pretty_dates(df), hide_index=True, width="stretch", height=520)
 
             dark_pool()
 
@@ -747,13 +1122,13 @@ with tabs[4]:
 # --------------------------------------------------------------------------- #
 # 2. Earnings
 # --------------------------------------------------------------------------- #
-with tabs[6]:
+with tabs[7]:
     st.subheader("Earnings this week")
     today_d = data.now_et().date()
     wk = st.radio("Week", ["This week", "Next week"], horizontal=True, key="earn_week")
     monday = today_d - dt.timedelta(days=today_d.weekday()) + dt.timedelta(weeks=wk == "Next week")
     friday = monday + dt.timedelta(days=4)
-    st.caption(f"{monday:%a %b %d} – {friday:%a %b %d}. **BMO** = reports before the 9:30 open "
+    st.caption(f"{monday:%a %d/%b/%Y} – {friday:%a %d/%b/%Y}. **BMO** = reports before the 9:30 open "
                "(trade the reaction that morning). **AMC** = reports after the 4:00 close "
                "(reaction is the next morning's pre-market).")
     ew_tabs = st.tabs(["Your watchlist", "All companies (Unusual Whales)"])
@@ -763,7 +1138,8 @@ with tabs[6]:
         if ew.empty:
             st.info("None of your watchlist tickers report this week.")
         else:
-            st.dataframe(ew.style.format({"EPS est": "{:.2f}", "EPS actual": "{:.2f}"}, na_rep="—"),
+            st.dataframe(ew.assign(Date=ew["Date"].map(lvl.fmt_date))
+                         .style.format({"EPS est": "{:.2f}", "EPS actual": "{:.2f}"}, na_rep="—"),
                          hide_index=True, width="stretch")
     with ew_tabs[1]:
         if not uw.api_key() or demo:
@@ -785,7 +1161,7 @@ with tabs[6]:
                 q = st.text_input("Filter (ticker)", "", key="earn_filter").upper()
                 if q and tcol:
                     allw = allw[allw[tcol].astype(str).str.contains(q)]
-                st.dataframe(allw[lead + [c for c in allw.columns if c not in lead]],
+                st.dataframe(pretty_dates(allw[lead + [c for c in allw.columns if c not in lead]]),
                              hide_index=True, width="stretch", height=520)
                 st.caption("If every day shows the same list, Unusual Whales ignored the date "
                            "filter – tell Claude and it will switch to their per-ticker endpoint.")
@@ -802,7 +1178,8 @@ with tabs[6]:
     if upcoming.empty:
         st.info("No watchlist names report in this window.")
     else:
-        st.dataframe(upcoming.style.format({"EPS est": "{:.2f}", "Revenue est": "{:,.0f}"},
+        st.dataframe(upcoming.assign(Date=upcoming["Date"].map(lvl.fmt_date))
+                     .style.format({"EPS est": "{:.2f}", "Revenue est": "{:,.0f}"},
                                            na_rep="—"), hide_index=True, width="stretch")
 
         et = st.selectbox("Implied vs historical move", upcoming["Ticker"].tolist())
@@ -813,9 +1190,9 @@ with tabs[6]:
         hist = an.earnings_reactions(daily, data.past_earnings_dates(et, demo=demo))
         c1, c2, c3 = st.columns(3)
         imp = np.nan
-        if exps:
+        if exps and pd.notna(spot):
             imp = an.implied_move(load_chain(et, exps[0], spot, demo), spot)
-            c1.metric(f"Implied move (exp {exps[0]})", f"±{imp:.1f}%" if pd.notna(imp) else "—")
+            c1.metric(f"Implied move (exp {lvl.fmt_date(exps[0])})", f"±{imp:.1f}%" if pd.notna(imp) else "—")
         if len(hist):
             avg = hist["Day move %"].abs().mean()
             c2.metric("Avg historical move", f"±{avg:.1f}%")
@@ -837,42 +1214,68 @@ with tabs[6]:
 # --------------------------------------------------------------------------- #
 # 3. Swing setups
 # --------------------------------------------------------------------------- #
-with tabs[7]:
-    st.caption(f"Stop = {stop_atr}×ATR, target = {target_atr}×ATR, max {max_days} days. "
-               "**P(target before stop)** = random-walk math; **P(touch target)** = lognormal "
-               "with 20-day realized vol; **Hist win rate** = how often this exact setup hit "
-               "target before stop over the last ~5 years on this ticker.")
+with tabs[8]:
+    st.caption(f"Setups: trend pullback, breakout, oversold bounce · stop {stop_atr}×ATR · "
+               f"target {target_atr}×ATR · max {max_days} days.")
     with st.spinner("Scanning setups (backtesting each ticker)…"):
         scans = load_swing(tuple(tickers), demo, stop_atr, target_atr, max_days)
-    sdf = pd.DataFrame([{k: v for k, v in s.items() if k != "_stats"} for s in scans])
-    only_active = st.checkbox("Only tickers with a setup today", value=False)
-    view = sdf[sdf["Setups today"] != "—"] if only_active else sdf
-    view = view.sort_values(["Hist win rate", "P(touch target)"], ascending=False, na_position="last")
-    st.dataframe(
-        view.style.format({"Price": "{:,.2f}", "RSI": "{:.0f}", "ATR %": "{:.1f}%",
-                           "Entry": "{:,.2f}", "Stop": "{:,.2f}", "Target": "{:,.2f}",
-                           "P(target before stop)": "{:.0%}", "P(touch target)": "{:.0%}",
-                           "Hist win rate": "{:.0%}"}, na_rep="—"),
-        hide_index=True, width="stretch")
+    if not scans:
+        st.info("No swing data for your watchlist – check the symbols, or turn on Demo data to preview.")
+    else:
+        sdf = pd.DataFrame([{k: v for k, v in s.items() if k != "_stats"} for s in scans])
+        active = sdf[sdf["Setups today"] != "—"].copy()
+        strong = (active["Hist win rate"] >= HIGH_PROB) & (active["Hist signals"] >= MIN_SIGNALS)
+        hi_df = active[strong].sort_values("Hist win rate", ascending=False)
+        lo_df = active[~strong].sort_values("Hist win rate", ascending=False, na_position="last")
+        cols = ["Ticker", "Setups today", "Hist win rate", "Hist signals", "Price", "Trend", "RSI",
+                "Entry", "Stop", "Target", "ATR %"]
+        fmt = {"Price": "{:,.2f}", "RSI": "{:.0f}", "ATR %": "{:.1f}%", "Entry": "{:,.2f}",
+               "Stop": "{:,.2f}", "Target": "{:,.2f}", "Hist win rate": "{:.0%}", "Hist signals": "{:.0f}"}
+        ren = {"Hist win rate": "Win probability", "Hist signals": "Times seen"}
+        fmt_r = {ren.get(k, k): v for k, v in fmt.items()}
 
-    sp = st.selectbox("Chart & setup history", tickers, key="swing_pick")
-    sc = next(s for s in scans if s["Ticker"] == sp)
-    st.dataframe(pd.DataFrame(sc["_stats"]).T.rename(columns={"n": "Signals", "win_rate": "Win rate",
-                                                              "avg_ret": "Avg return"})
-                 .style.format({"Win rate": "{:.0%}", "Avg return": "{:+.2%}", "Signals": "{:.0f}"},
-                               na_rep="—"), width="stretch")
-    d = an.add_indicators(load_daily(sp, demo)).tail(180)
-    fig = go.Figure([candles(d, sp)])
-    for col, color in zip(("EMA20", "SMA50", "SMA200"), SERIES):
-        fig.add_trace(go.Scatter(x=d.index, y=d[col], name=col, line=dict(color=color, width=2)))
-    for lbl, y in (("Stop", sc["Stop"]), ("Target", sc["Target"])):
-        fig.add_hline(y=y, line_dash="dot", line_color=MUTED, annotation_text=f"{lbl} {y:,.2f}")
-    st.plotly_chart(style_fig(fig), width="stretch", theme="streamlit")
+        st.subheader(f"✅ High-probability setups (≥ {HIGH_PROB:.0%}) — {len(hi_df)}")
+        if hi_df.empty:
+            st.info(f"No setup today has won at least {HIGH_PROB:.0%} of the time (with {MIN_SIGNALS}+ past "
+                    "occurrences). Setups below that are listed next with their probability.")
+        else:
+            st.dataframe(hi_df[cols].rename(columns=ren).style.format(fmt_r, na_rep="—"),
+                         hide_index=True, width="stretch")
+
+        st.subheader(f"Below {HIGH_PROB:.0%} — {len(lo_df)}")
+        if lo_df.empty:
+            st.caption("None.")
+        else:
+            lo_show = lo_df[cols].rename(columns=ren)
+            lo_show.insert(3, "Note", ["small sample" if n < MIN_SIGNALS else ""
+                                       for n in lo_df["Hist signals"]])
+            st.dataframe(lo_show.style.format(fmt_r, na_rep="—"), hide_index=True, width="stretch")
+
+        quiet = sdf[sdf["Setups today"] == "—"]["Ticker"].tolist()
+        if quiet:
+            st.caption(f"No setup today: {', '.join(quiet)}")
+        st.caption(f"**Win probability** = of the past times this setup appeared on this ticker (~5 years of "
+                   f"daily candles), how often price reached the target ({target_atr}×ATR) before the stop "
+                   f"({stop_atr}×ATR) within {max_days} days. Change stop/target in the sidebar: a closer "
+                   "target raises the win rate but lowers the payoff. **Times seen** = how many past "
+                   f"occurrences; under {MIN_SIGNALS} is a small sample. Past results don't guarantee future ones.")
+
+        sp = st.selectbox("Chart & setup history", [x["Ticker"] for x in scans], key="swing_pick")
+        sc = next(s for s in scans if s["Ticker"] == sp)
+        st.dataframe(pd.DataFrame(sc["_stats"]).T.rename(columns={"n": "Signals", "win_rate": "Win rate",
+                                                                  "avg_ret": "Avg return"})
+                     .style.format({"Win rate": "{:.0%}", "Avg return": "{:+.2%}", "Signals": "{:.0f}"},
+                                   na_rep="—"), width="stretch")
+        stf, scustom = tf_picker("swing_tf", "Daily")
+        price_chart(sp, stf, ["Support / resistance"], key=f"swing_{sp}_{stf}", custom=scustom,
+                    extra_levels=[{"price": sc["Stop"], "title": "Stop", "color": DOWN, "style": "dash"},
+                                  {"price": sc["Target"], "title": "Target", "color": UP, "style": "dash"}])
+        st.caption("Stop and target come from the daily setup scan above.")
 
 # --------------------------------------------------------------------------- #
 # 4. LEAPS
 # --------------------------------------------------------------------------- #
-with tabs[5]:
+with tabs[6]:
     c1, c2, c3, c4 = st.columns(4)
     lt = c1.selectbox("Ticker", tickers, key="leaps_pick")
     kind = c2.radio("Type", ["call", "put"], horizontal=True)
@@ -881,76 +1284,121 @@ with tabs[5]:
                        help="Implied = market's view. Historical = what the stock has actually done.")
     spot = last_price(lt)
     daily = load_daily(lt, demo)
-    hv = an.realized_vol(daily["Close"], 252) if vol_src.startswith("Hist") else None
-    exps = [e for e in load_expirations(lt, demo)
-            if (pd.Timestamp(e).date() - data.now_et().date()).days >= min_dte]
-    if not exps:
-        st.warning(f"No expirations ≥ {min_dte} days for {lt}.")
+    if daily.empty or pd.isna(spot):
+        no_data(lt)
     else:
-        chain = pd.concat([load_chain(lt, e, spot, demo) for e in exps], ignore_index=True)
-        tbl = an.leaps_table(chain, spot, rate, kind, hv)
-        dmin, dmax = st.slider("Delta range (abs)", 0.05, 0.99, (0.55, 0.95))
-        tbl = tbl[tbl["Delta"].abs().between(dmin, dmax)]
-        st.metric(f"{lt} spot", f"{spot:,.2f}")
-        st.dataframe(
-            tbl.style.format({"Strike": "{:,.2f}", "Mid": "{:,.2f}", "IV %": "{:.0f}",
-                              "Delta": "{:.2f}", "Theta/day": "{:.3f}", "Breakeven": "{:,.2f}",
-                              "BE move %": "{:+.1f}%", "Extrinsic %": "{:.0f}%",
-                              "P(ITM)": "{:.0%}", "P(profit @ exp)": "{:.0%}",
-                              "Leverage": "{:.1f}x", "Spread %": "{:.1f}%", "Fit score": "{:.0f}"},
-                             na_rep="—"),
-            hide_index=True, width="stretch", height=480)
-        st.caption("**Fit score** favours delta ≈ 0.70–0.85, low extrinsic value (less time decay), "
-                   "tight spreads and open interest – the classic stock-replacement LEAPS profile.")
+        hv = an.realized_vol(daily["Close"], 252) if vol_src.startswith("Hist") else None
+        exps = [e for e in load_expirations(lt, demo)
+                if (pd.Timestamp(e).date() - data.now_et().date()).days >= min_dte]
+        if not exps:
+            st.warning(f"No expirations ≥ {min_dte} days for {lt}.")
+        else:
+            chain = pd.concat([load_chain(lt, e, spot, demo) for e in exps], ignore_index=True)
+            tbl = an.leaps_table(chain, spot, rate, kind, hv)
+            if tbl.empty or "Delta" not in tbl:
+                st.info(f"No usable option quotes for {lt} right now.")
+                tbl = pd.DataFrame(columns=["Fit score", "Expiry", "Delta"])
+            dmin, dmax = st.slider("Delta range (abs)", 0.05, 0.99, (0.55, 0.95))
+            tbl = tbl[tbl["Delta"].abs().between(dmin, dmax)]
+            st.metric(f"{lt} spot", f"{spot:,.2f}")
+            st.dataframe(
+                tbl.assign(Expiry=tbl["Expiry"].map(lvl.fmt_date)).style.format({"Strike": "{:,.2f}", "Mid": "{:,.2f}", "IV %": "{:.0f}",
+                                  "Delta": "{:.2f}", "Theta/day": "{:.3f}", "Breakeven": "{:,.2f}",
+                                  "BE move %": "{:+.1f}%", "Extrinsic %": "{:.0f}%",
+                                  "P(ITM)": "{:.0%}", "P(profit @ exp)": "{:.0%}",
+                                  "Leverage": "{:.1f}x", "Spread %": "{:.1f}%", "Fit score": "{:.0f}"},
+                                 na_rep="—"),
+                hide_index=True, width="stretch", height=480)
+            st.caption("**Fit score** favours delta ≈ 0.70–0.85, low extrinsic value (less time decay), "
+                       "tight spreads and open interest – the classic stock-replacement LEAPS profile.")
 
 # --------------------------------------------------------------------------- #
 # 5. Day trading
 # --------------------------------------------------------------------------- #
-with tabs[8]:
+with tabs[9]:
+    with st.expander("ℹ️ How to use this page"):
+        st.markdown(
+            "1. **Pick a ticker and a timeframe** (1m–5m for the open, 15m–1h for the trend of the day).\n"
+            "2. **Read the four numbers**: is the stock moving more than normal (Relative volume), how far it "
+            "gapped, and how much of a normal day's move is already used up (Range used).\n"
+            "3. **Watch price against the lines on the chart.** The table below lists every line, its price, "
+            "how far it is from the current price, and what it usually means.\n"
+            "4. **Opening-range breakout:** after 10:00, a move above the *Opening range high* is bullish, "
+            "below the *Opening range low* is bearish. Pre-market and prior-day levels are the next targets.\n"
+            "5. **Chart colors:** purple = VWAP (above it = buyers in control today, below = sellers) · "
+            "blue = EMA 9 (short-term trend) · white = EMA 200 (long-term trend) · bars at the bottom = "
+            "volume · lower panel = MACD: red line crossing above yellow = momentum turning up, below = down.\n"
+            "6. **Touch:** pinch to zoom the candles, drag sideways to move, swipe up/down to scroll the page. "
+            "**Reset view** jumps back to the latest candles.")
     c1, c2 = st.columns([1, 3])
     dtk = c1.selectbox("Ticker", tickers, key="dt_pick")
-    interval = c1.radio("Bars", ["1m", "5m"], index=1, horizontal=True)
-    intra = load_intraday(dtk, demo, interval=interval, days=5 if interval == "5m" else 3)
-    info = an.day_levels(intra, load_daily(dtk, demo))
-    lv, stx = info["levels"], info["stats"]
-    with c1:
-        st.metric("ATR (14d)", f"{stx['ATR']:.2f}")
-        if "Gap %" in stx:
-            st.metric("Gap", f"{stx['Gap %']:+.2f}%")
-        if "RVOL" in stx and pd.notna(stx["RVOL"]):
-            st.metric("Relative volume", f"{stx['RVOL']:.2f}x")
-        if "ATR used %" in stx:
-            st.metric("ATR used today", f"{stx['ATR used %']:.0f}%")
-        st.dataframe(pd.Series(lv, name="Level").sort_values(ascending=False).map("{:,.2f}".format),
-                     width="stretch")
     with c2:
-        t = info["today"]
-        fig = go.Figure([candles(t, dtk)])
-        if len(info["rth"]):
-            fig.add_trace(go.Scatter(x=info["rth"].index, y=an.vwap(info["rth"]), name="VWAP",
-                                     line=dict(color=SERIES[0], width=2)))
-        groups = {"PMH": SERIES[1], "PML": SERIES[1], "ORH": SERIES[2], "ORL": SERIES[2]}
-        for k, y in lv.items():
-            if k in ("R2", "S2"):
-                continue
-            fig.add_hline(y=y, line_width=1, line_dash="dot" if k not in groups else "dash",
-                          line_color=groups.get(k, MUTED), annotation_text=f"{k} {y:,.2f}",
-                          annotation_position="top left", annotation_font_size=11)
-        # Frame today's bars plus any key level within half an ATR of them.
-        lo, hi = t["Low"].min(), t["High"].max()
-        near = [y for y in lv.values() if lo - stx["ATR"] / 2 <= y <= hi + stx["ATR"] / 2]
-        lo, hi = min([lo] + near), max([hi] + near)
-        pad = (hi - lo) * 0.05
-        fig.update_yaxes(range=[lo - pad, hi + pad])
-        st.plotly_chart(style_fig(fig, 600), width="stretch", theme="streamlit")
-    st.caption("PDH/PDL/PDC = prior day high/low/close · PMH/PML = pre-market high/low · "
-               "ORH/ORL = 30-min opening range (9:30–10:00) · R1/S1 = floor pivots. RVOL compares today's "
-               "volume so far with the same time of day on prior sessions.")
+        dtf, dcustom = tf_picker("dt_tf", "5m")
+    intra = load_intraday(dtk, demo, interval="5m", days=5)
+    if intra.empty or load_daily(dtk, demo).empty:
+        no_data(dtk)
+    else:
+        info = an.day_levels(intra, load_daily(dtk, demo))
+        lv, stx = info["levels"], info["stats"]
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("ATR (14-day)", f"{stx['ATR']:.2f}",
+                  help="**Average True Range** – how much this stock typically moves in one day (high to low, "
+                       "including overnight gaps), averaged over 14 days.\n\nUse it to size stops and targets: "
+                       "with ATR 3.00, a 1.00 move is about a third of a normal day. Higher ATR = wilder stock.")
+        m2.metric("Gap", f"{stx['Gap %']:+.2f}%" if "Gap %" in stx else "—",
+                  help="How far the **pre-market price** is from **yesterday's close**, in %.\n\n"
+                       "Over ±2% usually means news. Gaps that hold above/below the pre-market high/low tend to "
+                       "keep going; weak gaps often drift back toward yesterday's close ('gap fill').")
+        rv = stx.get("RVOL")
+        m3.metric("Relative volume", f"{rv:.2f}x" if rv is not None and pd.notna(rv) else "—",
+                  help="**Today's volume so far ÷ the normal volume by this time of day.**\n\n"
+                       "1.0x = normal · 2.0x = twice normal (strong interest – moves tend to follow through) · "
+                       "under 1x = quiet (breakouts fail more often). Shows '—' before the open.")
+        used = stx.get("ATR used %")
+        m4.metric("Range used today", f"{used:.0f}%" if used is not None else "—",
+                  help="**Today's high-to-low range as a % of ATR** – how much of a normal day's move has "
+                       "already happened.\n\nUnder ~50% = room left to run · around 100% = a full normal day "
+                       "already · over 100% = extended, new highs/lows get harder. Shows '—' before the open.")
+
+        bars = load_bars(dtk, dtf, demo, dcustom)
+        vw_now, vw_line = None, []
+        if is_intraday(dtf, dcustom) and len(bars):
+            # VWAP restarts each session (regular hours only); a gap between sessions, not a line
+            mm = bars.index.hour * 60 + bars.index.minute
+            rth = bars[(mm >= 570) & (mm < 960)]
+            if len(rth):
+                parts = [an.vwap(g) for _, g in rth.groupby(rth.index.date)]
+                vwap_all = pd.concat(parts).reindex(bars.index)       # NaN outside regular hours = gap
+                vw_line = [{"points": list(zip(bars.index, vwap_all.values)), "color": "#a855f7",
+                            "style": "solid", "title": "VWAP"}]
+                if rth.index[-1].date() == data.now_et().date():
+                    vw_now = float(parts[-1].iloc[-1])
+        price_chart(dtk, dtf, list(LEVEL_GROUPS), key=f"dt_{dtk}_{dtf}", height=520, custom=dcustom,
+                    extra_lines=vw_line)
+        st.caption("Purple = **VWAP** (today's volume-weighted average price). Blue = EMA 9, white = EMA 200, "
+                   "bars at the bottom = volume, lower panel = MACD (red) and signal (yellow).")
+
+        st.subheader("Levels – what each line means")
+        price = last_price(dtk)
+        rows = []
+        for k, (name, meaning) in LEVEL_INFO.items():
+            if k in lv:
+                rows.append({"Level": name, "Price": lv[k], "Meaning": meaning})
+        if vw_now is not None:
+            rows.append({"Level": "VWAP (today)", "Price": vw_now,
+                         "Meaning": "Volume-weighted average price. Above = buyers in control; below = sellers."})
+        lt_df = pd.DataFrame(rows).sort_values("Price", ascending=False)
+        if pd.notna(price):
+            lt_df.insert(2, "Distance", [f"{(p / price - 1) * 100:+.2f}%" for p in lt_df["Price"]])
+            lt_df.insert(3, "Where", ["above price ▲" if p > price else "below price ▼" for p in lt_df["Price"]])
+            st.caption(f"Current price: **{price:,.2f}**. Levels are sorted high → low.")
+        # st.table wraps long text, so every "Meaning" is readable in full
+        st.table(lt_df.set_index("Level").style.format({"Price": "{:,.2f}"}))
 
 # --------------------------------------------------------------------------- #
 # 6. Plugins: your own scripts
 # --------------------------------------------------------------------------- #
-with tabs[9]:
+with tabs[10]:
     st.caption("Drop a `.py` file into the `plugins/` folder with `TITLE = '…'` and "
                "`def run(tickers): …` – it appears here. See the examples in that folder.")
     plugin_files = sorted(p for p in (ROOT / "plugins").glob("*.py") if not p.name.startswith("_"))
@@ -983,7 +1431,17 @@ with tabs[9]:
                 else:
                     st.code(str(item))
 
-if data.WARNINGS:
-    with st.sidebar.expander(f"⚠️ {len(data.WARNINGS)} data notices"):
-        for w in data.WARNINGS:
-            st.write("•", w)
+# Data check: name the tickers that returned nothing, and nothing else.
+_today = load_today(tuple(tickers), demo)
+_missing = (_today.loc[_today["Behavior"].astype(str).str.startswith("No data"), "Ticker"].tolist()
+            if "Behavior" in _today else [])
+_coins = load_crypto(tuple(crypto_list), demo) if crypto_list else pd.DataFrame()
+_missing_coins = _coins.loc[_coins["Price"].isna(), "Coin"].tolist() if len(_coins) else []
+if _missing or _missing_coins:
+    with st.sidebar:
+        st.subheader("Data check")
+        if _missing:
+            st.warning(f"No data found for **{', '.join(_missing)}**. Check the spelling, or remove "
+                       "it from your watchlist.")
+        if _missing_coins:
+            st.warning(f"No price for crypto **{', '.join(_missing_coins)}** right now.")
