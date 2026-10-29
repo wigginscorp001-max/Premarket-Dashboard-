@@ -66,6 +66,7 @@ def analyze_day(day: pd.DataFrame, prev_close: float = NAN) -> dict:
     row.update({
         "PM last": pm_last,
         "Gap %": (pm_last / prev_close - 1) * 100 if prev_close == prev_close else NAN,
+        "Gap $": pm_last - prev_close if prev_close == prev_close else NAN,
         "PM high": traded["High"].max(), "PM low": traded["Low"].min(),
         "PM VWAP": pm_vwap, "PM bias": bias, "PM volume": int(vol),
         "Last PM print": traded.index[-1].strftime("%H:%M"),

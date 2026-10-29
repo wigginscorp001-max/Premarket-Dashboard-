@@ -154,6 +154,7 @@ def scan_row(ticker: str, bars: pd.DataFrame, flow: pd.Series | None = None, gam
     last_min = int(_minutes(bars.index[-1:])[0])
     is_today_rth = last_min >= OPEN and "Open" in base
     gap = (base["Open"] / prev - 1) * 100 if is_today_rth and prev == prev else base.get("Gap %", NAN)
+    gap_usd = base["Open"] - prev if is_today_rth and prev == prev else base.get("Gap $", NAN)
     rv = relative_volume(bars)
     pmh, pml = base["PM high"], base["PM low"]
 
@@ -219,7 +220,7 @@ def scan_row(ticker: str, bars: pd.DataFrame, flow: pd.Series | None = None, gam
     row.update({
         "Score": int(score), "Direction": direction if score else "—",
         "Price": price, "Change %": (price / prev - 1) * 100 if prev == prev else NAN,
-        "Gap %": gap, "RVOL": rv,
+        "Gap %": gap, "Gap $": gap_usd, "RVOL": rv,
         "PM high": pmh, "PM low": pml, "PM status": pm_status,
         "ORB high": orh, "ORB low": orl, "ORB status": orb_status,
         "VWAP": vwap, "vs VWAP": ("Above" if price >= vwap else "Below") if vwap == vwap else "—",

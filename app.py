@@ -364,6 +364,11 @@ def no_data(t: str) -> None:
     st.warning(f"**{t}**: no data – check the symbol (it may be misspelled or not covered by the data feed).")
 
 
+def usd_signed(v) -> str:
+    """+$1.25 / -$0.40 / — for missing."""
+    return "—" if pd.isna(v) else f"{'+' if v >= 0 else '-'}${abs(v):,.2f}"
+
+
 def bias_color(v):
     return f"color: {UP}" if v in ("BULLISH", "Bullish") else f"color: {DOWN}" if v in ("BEARISH", "Bearish") else ""
 
@@ -634,7 +639,7 @@ with tabs[0]:
         st.subheader("Watchlist gaps")
         with st.spinner("Loading pre-market data…"):
             pm = load_today(tuple(tickers), demo)
-        cols_pm = [c for c in ("Ticker", "Prev close", "PM last", "Gap %", "PM high", "PM low",
+        cols_pm = [c for c in ("Ticker", "Prev close", "PM last", "Gap %", "Gap $", "PM high", "PM low",
                                "PM VWAP", "PM bias", "PM volume", "Last PM print", "Behavior")
                    if c in pm.columns]
         pm = pm[cols_pm]
@@ -645,8 +650,8 @@ with tabs[0]:
             st.dataframe(
                 pm.style.format({"Prev close": "{:,.2f}", "PM last": "{:,.2f}", "PM high": "{:,.2f}",
                                  "PM low": "{:,.2f}", "PM VWAP": "{:,.2f}", "PM volume": "{:,.0f}",
-                                 "Gap %": "{:+.2f}%"}, na_rep="—")
-                .map(signed_color, subset=[c for c in ["Gap %"] if c in pm.columns])
+                                 "Gap %": "{:+.2f}%", "Gap $": usd_signed}, na_rep="—")
+                .map(signed_color, subset=[c for c in ["Gap %", "Gap $"] if c in pm.columns])
                 .map(bias_color, subset=[c for c in ["PM bias"] if c in pm.columns]),
                 hide_index=True, width="stretch", height=min(38 * (len(pm) + 1), 620))
             missing = pm[pm["Behavior"] == "no pre-market trades"]["Ticker"].tolist() if "Behavior" in pm else []
@@ -656,11 +661,19 @@ with tabs[0]:
         with right:
             g = (pm.dropna(subset=["Gap %"]).sort_values("Gap %") if "Gap %" in pm
                  else pd.DataFrame(columns=["Ticker", "Gap %"]))
+            gap_usd = g["Gap $"] if "Gap $" in g else pd.Series(np.nan, index=g.index)
             fig = go.Figure(go.Bar(x=g["Gap %"], y=g["Ticker"], orientation="h",
                                    marker_color=[UP if v > 0 else DOWN for v in g["Gap %"]],
-                                   hovertemplate="%{y}: %{x:+.2f}%<extra></extra>"))
-            fig.update_layout(title="Gap % vs prior close", height=max(300, 26 * len(g)),
+                                   customdata=[usd_signed(v) for v in gap_usd],
+                                   text=[f"{p:+.2f}% · {usd_signed(v)}" for p, v in zip(g["Gap %"], gap_usd)],
+                                   textposition="outside", cliponaxis=False,
+                                   hovertemplate="%{y}: %{x:+.2f}% (%{customdata})<extra></extra>"))
+            fig.update_layout(title="Gap vs prior close (% and $)", height=max(300, 26 * len(g)),
                               margin=dict(l=10, r=10, t=40, b=10), xaxis_ticksuffix="%")
+            if len(g):   # room for the labels at the bar ends
+                lo, hi = min(g["Gap %"].min(), 0), max(g["Gap %"].max(), 0)
+                pad = (hi - lo or 1) * 0.45
+                fig.update_xaxes(range=[lo - (pad if lo < 0 else 0), hi + (pad if hi > 0 else 0)])
             st.plotly_chart(fig, width="stretch", theme="streamlit")
 
         sess = pd.to_datetime(pd.Series(load_today(tuple(tickers), demo).get("Session date", pd.Series(dtype=object))),
@@ -720,6 +733,7 @@ SCAN_HELP = {
     "Signals": "Which signals are on right now.",
     "Change %": "Price now vs yesterday's 4:00 PM close.",
     "Gap %": "Before 9:30: last pre-market price vs yesterday's close. After 9:30: today's open vs yesterday's close.",
+    "Gap $": "The same gap in dollars per share.",
     "RVOL": "Relative volume – trading since 4:00 AM vs the usual amount by this time of day. 2.0x = twice normal.",
     "PM status": "Where price sits vs the pre-market high/low (4:00–9:29).",
     "ORB status": "Where price sits vs the 9:30–10:00 opening range. Fills in after 10:00.",
@@ -800,7 +814,7 @@ with tabs[1]:
         if "Gap %" not in res:
             st.warning("No data for these tickers yet.")
             return
-        for c in ("Price", "Change %", "Gap %", "RVOL", "PM high", "PM low", "ORB high", "ORB low", "Calls %",
+        for c in ("Price", "Change %", "Gap %", "Gap $", "RVOL", "PM high", "PM low", "ORB high", "ORB low", "Calls %",
                   "Calls $", "Puts $", "Call wall", "Put wall", "Gamma flip"):
             if c in res:
                 res[c] = pd.to_numeric(res[c], errors="coerce").astype(float)
@@ -816,7 +830,7 @@ with tabs[1]:
         shown = res[res["Score"] >= min_score]
         if direction != "Both":
             shown = shown[shown["Direction"].str.startswith("▲" if direction.startswith("Bull") else "▼")]
-        cols = [c for c in ("Ticker", "Score", "Direction", "Signals", "Price", "Change %", "Gap %", "RVOL",
+        cols = [c for c in ("Ticker", "Score", "Direction", "Signals", "Price", "Change %", "Gap %", "Gap $", "RVOL",
                             "PM status", "PM high", "PM low", "ORB status", "ORB high", "ORB low", "vs VWAP",
                             "Calls %", "Calls $", "Puts $", "Gamma", "Call wall", "Put wall", "Gamma flip")
                 if c in shown.columns]
@@ -831,8 +845,8 @@ with tabs[1]:
         styled = (shown[cols].style
                   .format({c: "{:,.2f}" for c in price_cols if c in cols}
                           | {"Change %": "{:+.2f}%", "Gap %": "{:+.2f}%", "RVOL": "{:.1f}x",
-                             "Calls %": "{:.0f}%"} | money, na_rep="—")
-                  .map(signed_color, subset=[c for c in ("Change %", "Gap %") if c in cols])
+                             "Calls %": "{:.0f}%", "Gap $": usd_signed} | money, na_rep="—")
+                  .map(signed_color, subset=[c for c in ("Change %", "Gap %", "Gap $") if c in cols])
                   .map(lambda v: f"color: {UP}" if str(v).startswith("▲") else
                        f"color: {DOWN}" if str(v).startswith("▼") else "", subset=["Direction"]))
         st.dataframe(styled, hide_index=True, width="stretch", height=min(38 * (len(shown) + 1), 720),
