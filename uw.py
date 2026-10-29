@@ -28,6 +28,7 @@ ENDPOINTS = {
     "darkpool_ticker": "/api/darkpool/{ticker}",
     "gex_by_strike": "/api/stock/{ticker}/greek-exposure/strike",
     "gex_daily": "/api/stock/{ticker}/greek-exposure",
+    "spot_gex_strike": "/api/stock/{ticker}/spot-exposures/strike",
     "options_volume": "/api/stock/{ticker}/options-volume",
     "iv_rank": "/api/stock/{ticker}/iv-rank",
     "max_pain": "/api/stock/{ticker}/max-pain",

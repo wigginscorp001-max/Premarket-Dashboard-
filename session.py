@@ -61,7 +61,7 @@ def analyze_day(day: pd.DataFrame, prev_close: float = NAN) -> dict:
         "Last PM print": traded.index[-1].strftime("%H:%M"),
     })
     if orb.empty:
-        row["Behavior"] = "waiting for 9:30 open"
+        row["Behavior"] = "Pre-market live – behavior shows after 10:00"
         return row
     row.update({"ORB high": orb["High"].max(), "ORB low": orb["Low"].min(),
                 "Open": orb["Open"].iloc[0]})

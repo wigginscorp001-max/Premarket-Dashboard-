@@ -16,6 +16,7 @@ import analytics as an
 import data
 import levels as lvl
 import patterns as pt
+import scanner as sc
 import sectors as secs
 import session as ses
 import tvchart
@@ -325,6 +326,27 @@ def uw_panel(name: str, params: dict | None = None, ticker: str | None = None) -
     return None
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def load_flow_summary(tks: tuple, min_prem: int) -> pd.DataFrame:
+    """Unusual-options-flow totals per ticker (latest session)."""
+    frames = []
+    try:
+        for i in range(0, len(tks), 50):
+            frames.append(uw.fetch("flow_alerts", {"ticker_symbol": ",".join(tks[i:i + 50]),
+                                                   "min_premium": min_prem, "limit": 200}))
+    except uw.UWError:
+        # ticker list not accepted: take the most recent alerts market-wide instead
+        frames = [uw.fetch("flow_alerts", {"min_premium": min_prem, "limit": 200})]
+    df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    out = sc.flow_summary(df)
+    return out[out.index.isin(tks)]
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_gamma(t: str) -> dict:
+    return sc.gamma_levels(uw.fetch("spot_gex_strike", ticker=t))
+
+
 def first_col(df: pd.DataFrame, *names):
     return next((n for n in names if n in df.columns), None)
 
@@ -547,7 +569,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-SECTIONS = ["🌅 Pre-Market", "📊 Charts & Levels", "🗂️ Sectors", "🧭 PM → Close", "📐 Setups & Patterns",
+SECTIONS = ["🌅 Pre-Market", "🔎 Scanner", "📊 Charts & Levels", "🗂️ Sectors", "🧭 PM → Close", "📐 Setups & Patterns",
             "🐋 Options Flow", "🎯 Options & LEAPS", "📅 Earnings", "📈 Swing Odds",
             "⚡ Day Trading", "🧩 My Scripts"]
 
@@ -689,9 +711,158 @@ with tabs[0]:
     st.caption("Charts with these lines drawn in: **📊 Charts & Levels** tab.")
 
 # --------------------------------------------------------------------------- #
+# 0a. Scanner
+# --------------------------------------------------------------------------- #
+SCAN_HELP = {
+    "Score": "How many of the 5 signals point the same way (gap, relative volume, PM range, opening range, "
+             "options flow). Relative volume counts for both directions. 4–5 = strong agreement.",
+    "Direction": "▲ = most signals bullish, ▼ = most bearish.",
+    "Signals": "Which signals are on right now.",
+    "Change %": "Price now vs yesterday's 4:00 PM close.",
+    "Gap %": "Before 9:30: last pre-market price vs yesterday's close. After 9:30: today's open vs yesterday's close.",
+    "RVOL": "Relative volume – trading since 4:00 AM vs the usual amount by this time of day. 2.0x = twice normal.",
+    "PM status": "Where price sits vs the pre-market high/low (4:00–9:29).",
+    "ORB status": "Where price sits vs the 9:30–10:00 opening range. Fills in after 10:00.",
+    "vs VWAP": "Above/below the volume-weighted average price (pre-market VWAP before 9:30).",
+    "Calls %": "Share of unusual options premium in calls (latest session). 60%+ leans bullish, 40%- bearish.",
+    "Gamma": "Positive = dealers damp moves (choppy, pinned). Negative = dealers add to moves (trending, bigger ranges).",
+    "Call wall": "Strike with the most call gamma – often acts as resistance.",
+    "Put wall": "Strike with the most put gamma – often acts as support.",
+    "Gamma flip": "Estimated price where gamma switches from positive to negative.",
+}
+
+with tabs[1]:
+    st.caption("Finds the tickers worth a look **right now**. Each ticker is checked for 5 signals – "
+               "**gap**, **relative volume**, **pre-market range break**, **opening-range break** and "
+               "**options flow** – and gets a **Score** for how many agree. Hover a column title for its meaning.")
+    c1, c2 = st.columns([1.4, 2])
+    scope = c1.radio("Scan", ["Watchlist", "Sector", "Tickers I type"], horizontal=True, key="scan_scope")
+    universe = tickers
+    if scope == "Sector":
+        try:
+            sp_all = load_sp500()
+            sec_pick = c2.selectbox("Sector (S&P 500)", sorted(sp_all["Sector"].unique()), key="scan_sector")
+            universe = sp_all.loc[sp_all["Sector"] == sec_pick, "Ticker"].tolist()
+        except Exception as e:  # noqa: BLE001
+            c2.warning(f"Couldn't load the sector list ({e.__class__.__name__}).")
+            universe = []
+    elif scope == "Tickers I type":
+        universe = data.read_watchlist(c2.text_input("Tickers", "", placeholder="e.g. NVDA, AMD, SMCI",
+                                                     key="scan_typed"))[0]
+    filt = st.expander("⚙️ Filters – direction, minimum gap, volume, score, gamma levels")
+    want_gamma = filt.toggle("Gamma levels", value=scope != "Sector", key=f"scan_gamma_{scope}",
+                           help="Call wall, put wall, gamma flip and regime from Unusual Whales. Uses one "
+                                "extra request per ticker – best left off for big sector scans.")
+    f1, f2, f3, f4 = filt.columns(4)
+    direction = f1.selectbox("Direction", ["Both", "Bullish only", "Bearish only"], key="scan_dir")
+    min_gap = f2.number_input("Min gap %", 0.0, 50.0, 2.0, 0.5, key="scan_gap",
+                              help="A gap at least this big (up or down) counts as a signal.")
+    min_rvol = f3.number_input("Min relative volume", 0.5, 20.0, 2.0, 0.5, key="scan_rvol", format="%.1f",
+                               help="Relative volume at least this high counts as a signal. 2.0 = twice normal.")
+    min_score = f4.slider("Min score", 0, 5, 0, key="scan_score",
+                          help="Hide tickers with fewer agreeing signals. 0 = show everything.")
+    MIN_FLOW = 100_000
+
+    if scope == "Watchlist":
+        st.session_state["scan_for"] = tuple(universe)
+    elif st.button(f"🔎 Scan {len(universe)} tickers", type="primary", disabled=not universe):
+        st.session_state["scan_for"] = tuple(universe)
+
+    @st.fragment(run_every=run_every)
+    def scanner_table():
+        tl = st.session_state.get("scan_for")
+        if not tl or list(tl) != list(universe):
+            st.info("Pick what to scan, then press **Scan**.")
+            return
+        has_uw = bool(uw.api_key()) and not demo
+        flow = pd.DataFrame()
+        if has_uw:
+            try:
+                flow = load_flow_summary(tuple(tl), MIN_FLOW)
+            except Exception as e:  # noqa: BLE001
+                st.caption(f"Options flow unavailable ({e}).")
+        rows = []
+        prog = st.progress(0.0, text="Scanning…") if len(tl) > 12 else None
+        for i, t in enumerate(tl):
+            gm = None
+            if want_gamma and has_uw:
+                try:
+                    gm = load_gamma(t)
+                except Exception:  # noqa: BLE001
+                    gm = None
+            rows.append(sc.scan_row(t, load_intraday(t, demo), flow.loc[t] if t in flow.index else None, gm,
+                                    min_gap=min_gap, min_rvol=min_rvol, min_flow=MIN_FLOW))
+            if prog:
+                prog.progress((i + 1) / len(tl), text=f"Scanning {i + 1}/{len(tl)}: {t}")
+        if prog:
+            prog.empty()
+        res = pd.DataFrame(rows)
+        if "Gap %" not in res:
+            st.warning("No data for these tickers yet.")
+            return
+        for c in ("Price", "Change %", "Gap %", "RVOL", "PM high", "PM low", "ORB high", "ORB low", "Calls %",
+                  "Calls $", "Puts $", "Call wall", "Put wall", "Gamma flip"):
+            if c in res:
+                res[c] = pd.to_numeric(res[c], errors="coerce").astype(float)
+        res = res.assign(_g=res["Gap %"].abs()).sort_values(["Score", "_g"], ascending=False,
+                                                            na_position="last").drop(columns="_g")
+        m = st.columns(5)
+        m[0].metric("Scanned", len(res))
+        m[1].metric("▲ Bullish (score 3+)", int(((res["Score"] >= 3) & res["Direction"].str.startswith("▲")).sum()))
+        m[2].metric("▼ Bearish (score 3+)", int(((res["Score"] >= 3) & res["Direction"].str.startswith("▼")).sum()))
+        m[3].metric(f"RVOL {min_rvol:g}x+", int((res["RVOL"] >= min_rvol).sum()))
+        m[4].metric("Unusual flow", int((res.get("Flow alerts", pd.Series(dtype=float)) > 0).sum()))
+
+        shown = res[res["Score"] >= min_score]
+        if direction != "Both":
+            shown = shown[shown["Direction"].str.startswith("▲" if direction.startswith("Bull") else "▼")]
+        cols = [c for c in ("Ticker", "Score", "Direction", "Signals", "Price", "Change %", "Gap %", "RVOL",
+                            "PM status", "PM high", "PM low", "ORB status", "ORB high", "ORB low", "vs VWAP",
+                            "Calls %", "Calls $", "Puts $", "Gamma", "Call wall", "Put wall", "Gamma flip")
+                if c in shown.columns]
+        if not has_uw:
+            cols = [c for c in cols if c not in ("Calls %", "Calls $", "Puts $", "Gamma", "Call wall",
+                                                 "Put wall", "Gamma flip")]
+        elif not want_gamma:
+            cols = [c for c in cols if c not in ("Gamma", "Call wall", "Put wall", "Gamma flip")]
+        money = {c: (lambda v: "—" if pd.isna(v) else f"${v / 1e6:,.1f}M" if v >= 1e6 else f"${v / 1e3:,.0f}K")
+                 for c in ("Calls $", "Puts $")}
+        price_cols = ("Price", "PM high", "PM low", "ORB high", "ORB low", "Call wall", "Put wall", "Gamma flip")
+        styled = (shown[cols].style
+                  .format({c: "{:,.2f}" for c in price_cols if c in cols}
+                          | {"Change %": "{:+.2f}%", "Gap %": "{:+.2f}%", "RVOL": "{:.1f}x",
+                             "Calls %": "{:.0f}%"} | money, na_rep="—")
+                  .map(signed_color, subset=[c for c in ("Change %", "Gap %") if c in cols])
+                  .map(lambda v: f"color: {UP}" if str(v).startswith("▲") else
+                       f"color: {DOWN}" if str(v).startswith("▼") else "", subset=["Direction"]))
+        st.dataframe(styled, hide_index=True, width="stretch", height=min(38 * (len(shown) + 1), 720),
+                     column_config={c: st.column_config.Column(help=h) for c, h in SCAN_HELP.items() if c in cols})
+        if shown.empty:
+            st.info("Nothing matches these filters – lower **Min score** or the gap / volume minimums.")
+        st.caption(f"Updated {data.now_et():%H:%M:%S} ET · flow = unusual options alerts of "
+                   f"${MIN_FLOW:,}+ from the latest session"
+                   + ("" if live else " · turn on Auto-refresh in the sidebar for live updates"))
+        st.download_button("Download this scan (CSV)", res.to_csv(index=False),
+                           file_name=f"scan_{data.now_et():%Y-%m-%d_%H%M}.csv", key="scan_csv")
+
+    scanner_table()
+
+    with st.expander("How to read the scanner"):
+        st.markdown(
+            "- **Score 4–5** with ▲: gap up, heavy volume, holding above the pre-market high / opening range, "
+            "and call-heavy flow – the strongest long setups.\n"
+            "- **Score 4–5** with ▼: the same picture to the downside.\n"
+            "- **High score + Negative gamma**: moves tend to run further (dealers chase price).\n"
+            "- **High score + Positive gamma** near a **call wall** (longs) or **put wall** (shorts): "
+            "moves often stall there – a natural profit target.\n"
+            "- **Before 10:00** the opening-range signal can't fire yet, so the top possible score is 4.\n"
+            "- The scanner finds candidates – confirm on the chart (📊 Charts & Levels) before trading. "
+            "Not financial advice.")
+
+# --------------------------------------------------------------------------- #
 # 0b. Multi-ticker charts with levels
 # --------------------------------------------------------------------------- #
-with tabs[1]:
+with tabs[2]:
     picks = st.multiselect("Tickers", tickers, default=tickers[:4], max_selections=8, key="chart_picks")
     tf, custom = tf_picker("chart_tf", "5m")
     groups = st.multiselect("Lines", list(LEVEL_GROUPS), default=list(LEVEL_GROUPS), key="chart_groups")
@@ -713,7 +884,7 @@ with tabs[1]:
 # --------------------------------------------------------------------------- #
 # 1. Sectors: every S&P 500 sector, pre-market scan + company lookup
 # --------------------------------------------------------------------------- #
-with tabs[2]:
+with tabs[3]:
     try:
         sp = load_sp500()
     except Exception as e:  # noqa: BLE001
@@ -797,7 +968,7 @@ with tabs[2]:
 # --------------------------------------------------------------------------- #
 # 1a. Pre-market setup vs what happened by the afternoon
 # --------------------------------------------------------------------------- #
-with tabs[3]:
+with tabs[4]:
     st.caption("Your pre-market rules: **PM bias** = last pre-market price vs pre-market VWAP. "
                "**Opening range** = 9:30–10:00. **Behavior** compares the price after 10:00 with "
                "the opening range. **Afternoon** = 1:00–4:00 PM.")
@@ -881,7 +1052,7 @@ with tabs[3]:
 # --------------------------------------------------------------------------- #
 # 1b. Chart patterns / setups
 # --------------------------------------------------------------------------- #
-with tabs[4]:
+with tabs[5]:
     c1, c2, c3 = st.columns([1, 1, 2])
     tf = c1.radio("Scan on", ["Daily", "5-minute"], horizontal=True,
                   help="Which candles the pattern scanner looks at. Daily = swing setups. "
@@ -948,7 +1119,7 @@ with tabs[4]:
 # --------------------------------------------------------------------------- #
 # 1c. Unusual Whales (real-time flow, dark pool, GEX, market tide)
 # --------------------------------------------------------------------------- #
-with tabs[5]:
+with tabs[6]:
     if not uw.api_key():
         st.info("**Connect Unusual Whales:** on the hosted site, open the app's **Settings → Secrets** "
                 "and add `UW_API_KEY = \"your_key\"`. Running on your Mac, it reads the key from "
@@ -1014,7 +1185,8 @@ with tabs[5]:
                 pcol = first_col(df, "total_premium", "premium")
                 kcol = first_col(df, "type", "option_type")
                 if tcol and pcol and kcol and len(df):
-                    agg = (df.assign(side=df[kcol].astype(str).str.lower())
+                    agg = (df.assign(side=df[kcol].astype(str).str.lower(),
+                                     **{pcol: pd.to_numeric(df[pcol], errors="coerce").fillna(0)})
                            .pivot_table(index=tcol, columns="side", values=pcol, aggfunc="sum",
                                         fill_value=0))
                     agg["net"] = agg.get("call", 0) - agg.get("put", 0)
@@ -1122,7 +1294,7 @@ with tabs[5]:
 # --------------------------------------------------------------------------- #
 # 2. Earnings
 # --------------------------------------------------------------------------- #
-with tabs[7]:
+with tabs[8]:
     st.subheader("Earnings this week")
     today_d = data.now_et().date()
     wk = st.radio("Week", ["This week", "Next week"], horizontal=True, key="earn_week")
@@ -1214,7 +1386,7 @@ with tabs[7]:
 # --------------------------------------------------------------------------- #
 # 3. Swing setups
 # --------------------------------------------------------------------------- #
-with tabs[8]:
+with tabs[9]:
     st.caption(f"Setups: trend pullback, breakout, oversold bounce · stop {stop_atr}×ATR · "
                f"target {target_atr}×ATR · max {max_days} days.")
     with st.spinner("Scanning setups (backtesting each ticker)…"):
@@ -1275,7 +1447,7 @@ with tabs[8]:
 # --------------------------------------------------------------------------- #
 # 4. LEAPS
 # --------------------------------------------------------------------------- #
-with tabs[6]:
+with tabs[7]:
     c1, c2, c3, c4 = st.columns(4)
     lt = c1.selectbox("Ticker", tickers, key="leaps_pick")
     kind = c2.radio("Type", ["call", "put"], horizontal=True)
@@ -1315,7 +1487,7 @@ with tabs[6]:
 # --------------------------------------------------------------------------- #
 # 5. Day trading
 # --------------------------------------------------------------------------- #
-with tabs[9]:
+with tabs[10]:
     with st.expander("ℹ️ How to use this page"):
         st.markdown(
             "1. **Pick a ticker and a timeframe** (1m–5m for the open, 15m–1h for the trend of the day).\n"
@@ -1398,7 +1570,7 @@ with tabs[9]:
 # --------------------------------------------------------------------------- #
 # 6. Plugins: your own scripts
 # --------------------------------------------------------------------------- #
-with tabs[10]:
+with tabs[11]:
     st.caption("Drop a `.py` file into the `plugins/` folder with `TITLE = '…'` and "
                "`def run(tickers): …` – it appears here. See the examples in that folder.")
     plugin_files = sorted(p for p in (ROOT / "plugins").glob("*.py") if not p.name.startswith("_"))
