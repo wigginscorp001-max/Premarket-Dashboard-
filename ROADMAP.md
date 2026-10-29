@@ -8,7 +8,7 @@
   (trend vs EMA 9/200, VWAP, MACD, gap, relative volume, PM high/low, opening-range break,
   options flow, nearest support/resistance) with a simple score, e.g. "6 of 8 bullish".
   Used as a second opinion while looking at other charts or on the go. Short plain-English hints, not a full guide.
-- **Heat maps (page + app), Robinhood style:** tiles sized by market cap (bigger company = bigger tile
+- **Heat maps (BUILT 29/Oct/2026, 🟩 Heat Map tab; also Crypto L1/L2), Robinhood style:** tiles sized by market cap (bigger company = bigger tile
   and bigger ticker text), green/red shading by % change, ticker + % printed inside; tap a tile for its chart.
   Option to size by today's dollar volume instead. Includes: market/sector map,
   watchlist heat map, sector strength, and options-flow heat map (calls vs puts premium).
@@ -47,3 +47,8 @@
     call_delta, put_delta, call_vanna, put_vanna, call_charm, put_charm.
   - /api/stock/{t}/spot-exposures/strike – intraday, has price + time: call/put_gamma_oi, _vol, _bid, _ask,
     plus delta/vanna/charm in the same four flavors. Use *_gamma_oi for walls, flip and regime.
+
+## Nasdaq-100 & Russell 2000 (BUILT 29/Oct/2026)
+- Heat Map + Scanner can load the Nasdaq-100 (Wikipedia list) and the biggest 50–200 Russell 2000
+  companies by IWM weight (Unusual Whales ETF holdings if the plan includes them, else iShares download).
+- Pre-Market cards add live index ETFs: SPY, QQQ, IWM, DIA, SMH.

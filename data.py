@@ -37,6 +37,12 @@ MACRO = {
     "CL=F": "Crude oil",
     "GC=F": "Gold",
     "BTC-USD": "Bitcoin",
+    # index ETFs – live pre-market prices from Unusual Whales
+    "SPY": "S&P 500 (SPY)",
+    "QQQ": "Nasdaq-100 (QQQ)",
+    "IWM": "Russell 2000 (IWM)",
+    "DIA": "Dow (DIA)",
+    "SMH": "Semiconductors (SMH)",
 }
 
 
@@ -50,6 +56,56 @@ CRYPTO = {
     "APT": ("Aptos", "APT21794-USD"), "ALGO": ("Algorand", "ALGO-USD"),
     "LBC": ("LBRY Credits", "LBC-USD"),
 }
+
+
+# Crypto heat map: Layer 1 chains, Layer 2 networks and infrastructure – no meme coins.
+# coin -> (name, Yahoo symbol, group). Some Yahoo symbols carry a number to tell coins apart.
+CRYPTO_LAYERS = {
+    "BTC": ("Bitcoin", "BTC-USD", "Layer 1"), "ETH": ("Ethereum", "ETH-USD", "Layer 1"),
+    "SOL": ("Solana", "SOL-USD", "Layer 1"), "XRP": ("XRP Ledger", "XRP-USD", "Layer 1"),
+    "ADA": ("Cardano", "ADA-USD", "Layer 1"), "AVAX": ("Avalanche", "AVAX-USD", "Layer 1"),
+    "SUI": ("Sui", "SUI20947-USD", "Layer 1"), "TON": ("Toncoin", "TON11419-USD", "Layer 1"),
+    "DOT": ("Polkadot", "DOT-USD", "Layer 1"), "NEAR": ("NEAR", "NEAR-USD", "Layer 1"),
+    "APT": ("Aptos", "APT21794-USD", "Layer 1"), "ATOM": ("Cosmos", "ATOM-USD", "Layer 1"),
+    "ICP": ("Internet Computer", "ICP-USD", "Layer 1"), "HBAR": ("Hedera", "HBAR-USD", "Layer 1"),
+    "XLM": ("Stellar", "XLM-USD", "Layer 1"), "LTC": ("Litecoin", "LTC-USD", "Layer 1"),
+    "BCH": ("Bitcoin Cash", "BCH-USD", "Layer 1"), "ALGO": ("Algorand", "ALGO-USD", "Layer 1"),
+    "XTZ": ("Tezos", "XTZ-USD", "Layer 1"),
+    "ARB": ("Arbitrum", "ARB11841-USD", "Layer 2"), "OP": ("Optimism", "OP-USD", "Layer 2"),
+    "POL": ("Polygon", "POL28321-USD", "Layer 2"), "MNT": ("Mantle", "MNT27075-USD", "Layer 2"),
+    "IMX": ("Immutable", "IMX10603-USD", "Layer 2"), "STX": ("Stacks (Bitcoin L2)", "STX4847-USD", "Layer 2"),
+    "LINK": ("Chainlink", "LINK-USD", "Infrastructure"),
+}
+
+
+def crypto_caps(demo: bool = False) -> dict[str, float]:
+    """Market cap per coin in CRYPTO_LAYERS (slow to fetch – cache it for the day)."""
+    caps = {}
+    for sym, (_, yahoo, _) in CRYPTO_LAYERS.items():
+        cap = np.nan
+        if not _live(demo):
+            cap = float(_rng(sym, "cap").lognormal(23, 1.5)) * (40 if sym == "BTC" else 8 if sym == "ETH" else 1)
+        elif yf is not None:
+            try:
+                cap = float(yf.Ticker(yahoo).info.get("marketCap") or "nan")
+            except Exception:  # noqa: BLE001
+                pass
+        caps[sym] = cap
+    return caps
+
+
+def crypto_layers(caps: dict[str, float], demo: bool = False) -> pd.DataFrame:
+    """Price, 24h % and $ change for every coin in CRYPTO_LAYERS, with the given market caps."""
+    rows = []
+    for sym, (name, yahoo, group) in CRYPTO_LAYERS.items():
+        d = daily_history(yahoo, period="1mo", demo=demo, fallback_demo=False)
+        c = d["Close"].dropna()
+        price = float(c.iloc[-1]) if len(c) else np.nan
+        prev = float(c.iloc[-2]) if len(c) > 1 else np.nan
+        rows.append({"Ticker": sym, "Name": name, "Group": group, "Price": price,
+                     "Change $": price - prev, "Change %": (price / prev - 1) * 100 if prev else np.nan,
+                     "Market cap": caps.get(sym, np.nan)})
+    return pd.DataFrame(rows)
 
 
 def read_watchlist(text: str) -> tuple[list[str], list[str]]:
@@ -456,4 +512,34 @@ def option_chain(ticker: str, expiry: str, spot: float, demo: bool = False) -> p
                          "volume": int(rng.integers(0, 2000)), "oi": int(rng.integers(10, 20000))})
     out = pd.DataFrame(rows)
     out["expiry"] = expiry
+    return out
+
+
+def market_caps(tickers: list[str], demo: bool = False) -> dict[str, float]:
+    """Company value (market cap, $) per ticker – Yahoo first, then Unusual Whales. Missing = NaN."""
+    out: dict[str, float] = {}
+    for t in tickers:
+        cap = float("nan")
+        if not _live(demo):
+            cap = float(_rng(t, "cap").lognormal(25, 1.2))      # demo: made-up but stable sizes
+        else:
+            if yf is not None:
+                try:
+                    cap = float(yf.Ticker(t).fast_info["market_cap"] or "nan")
+                except Exception:  # noqa: BLE001
+                    pass
+                if not cap == cap or cap <= 0:      # ETFs have no market cap: use fund size instead
+                    try:
+                        cap = float(yf.Ticker(t).info.get("totalAssets") or "nan")
+                    except Exception:  # noqa: BLE001
+                        pass
+            if not cap == cap or cap <= 0:
+                try:
+                    import uw
+                    info = uw.get("/api/stock/{ticker}/info", ticker=t)
+                    info = info.get("data", info) if isinstance(info, dict) else {}
+                    cap = float(info.get("marketcap") or info.get("market_cap") or "nan")
+                except Exception:  # noqa: BLE001
+                    cap = float("nan")
+        out[t] = cap
     return out

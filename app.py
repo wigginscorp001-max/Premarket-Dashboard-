@@ -18,6 +18,7 @@ import data
 import levels as lvl
 import patterns as pt
 import scanner as sc
+import heatmap as hm
 import sectors as secs
 import session as ses
 import tvchart
@@ -306,6 +307,27 @@ def load_sp500() -> pd.DataFrame:
     return secs.sp500()
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_ndx() -> pd.DataFrame:
+    return secs.nasdaq100()
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_rut(top: int) -> tuple[pd.DataFrame, str]:
+    return secs.russell2000(top)
+
+
+def index_members(name: str, top: int = 100) -> tuple[pd.DataFrame, str]:
+    """(members, note) for "Nasdaq-100" or "Russell 2000"; empty frame and the reason on failure."""
+    try:
+        if name == "Nasdaq-100":
+            return load_ndx(), "Nasdaq-100 list: Wikipedia"
+        df, src = load_rut(top)
+        return df, f"Russell 2000 – top {len(df)} by weight in IWM · source: {src}"
+    except Exception as e:  # noqa: BLE001
+        return pd.DataFrame(columns=["Ticker", "Company", "Sector", "Sub-industry"]), f"⚠️ {e}"
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_earnings_week(tks: tuple, start: dt.date, end: dt.date, demo: bool) -> pd.DataFrame:
     return data.earnings_between(list(tks), start, end, demo=demo)
@@ -576,7 +598,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-SECTIONS = ["🌅 Pre-Market", "🔎 Scanner", "🎯 Confluence", "📊 Charts & Levels", "🗂️ Sectors", "🧭 PM → Close", "📐 Setups & Patterns",
+SECTIONS = ["🌅 Pre-Market", "🔎 Scanner", "🎯 Confluence", "🟩 Heat Map", "📊 Charts & Levels", "🗂️ Sectors", "🧭 PM → Close", "📐 Setups & Patterns",
             "🐋 Options Flow", "🎯 Options & LEAPS", "📅 Earnings", "📈 Swing Odds",
             "⚡ Day Trading", "🧩 My Scripts"]
 
@@ -615,7 +637,7 @@ if target in SECTIONS:
 # 1. Pre-market
 # --------------------------------------------------------------------------- #
 with tabs[0]:
-    st.subheader("Futures & macro")
+    st.subheader("Futures, macro & index ETFs")
     with st.spinner("Loading futures…"):
         macro = load_macro(demo)
     cols = st.container(key="macro").columns(5)
@@ -788,7 +810,8 @@ with tabs[1]:
                "**gap**, **relative volume**, **pre-market range break**, **opening-range break** and "
                "**options flow** – and gets a **Score** for how many agree. Hover a column title for its meaning.")
     c1, c2 = st.columns([1.4, 2])
-    scope = c1.radio("Scan", ["Watchlist", "Sector", "Tickers I type"], horizontal=True, key="scan_scope")
+    scope = c1.radio("Scan", ["Watchlist", "Sector", "Nasdaq-100", "Russell 2000", "Tickers I type"],
+                     horizontal=True, key="scan_scope")
     universe = tickers
     if scope == "Sector":
         try:
@@ -798,11 +821,17 @@ with tabs[1]:
         except Exception as e:  # noqa: BLE001
             c2.warning(f"Couldn't load the sector list ({e.__class__.__name__}).")
             universe = []
+    elif scope in ("Nasdaq-100", "Russell 2000"):
+        top = 100 if scope == "Nasdaq-100" else c2.select_slider(
+            "Biggest Russell 2000 companies", [50, 100, 150, 200], value=100, key="scan_rut_top")
+        members, note = index_members(scope, top)
+        c2.caption(note)
+        universe = members["Ticker"].tolist()
     elif scope == "Tickers I type":
         universe = data.read_watchlist(c2.text_input("Tickers", "", placeholder="e.g. NVDA, AMD, SMCI",
                                                      key="scan_typed"))[0]
     filt = st.expander("⚙️ Filters – direction, minimum gap, volume, score, gamma levels")
-    want_gamma = filt.toggle("Gamma levels", value=scope != "Sector", key=f"scan_gamma_{scope}",
+    want_gamma = filt.toggle("Gamma levels", value=scope in ("Watchlist", "Tickers I type"), key=f"scan_gamma_{scope}",
                            help="Call wall, put wall, gamma flip and regime from Unusual Whales. Uses one "
                                 "extra request per ticker – best left off for big sector scans.")
     f1, f2, f3, f4 = filt.columns(4)
@@ -1008,9 +1037,169 @@ with tabs[2]:
     confluence_cards()
 
 # --------------------------------------------------------------------------- #
+# 0a3. Heat maps
+# --------------------------------------------------------------------------- #
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_crypto_caps(demo: bool) -> dict:
+    return data.crypto_caps(demo=demo)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_crypto_layers(demo: bool) -> pd.DataFrame:
+    return data.crypto_layers(load_crypto_caps(demo), demo=demo)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_caps(tks: tuple, demo: bool) -> dict:
+    return data.market_caps(list(tks), demo=demo)
+
+
+def move_rows(tl) -> pd.DataFrame:
+    """Price, % and $ change vs yesterday's close, and today's dollar volume, per ticker."""
+    rows = []
+    prog = st.progress(0.0, text="Loading prices…") if len(tl) > 12 else None
+    for i, t in enumerate(tl):
+        bars = load_intraday(t, demo)
+        if len(bars):
+            prev = ses.today(t, bars).get("Prev close", np.nan)
+            price = float(bars["Close"].iloc[-1])
+            day = bars[bars.index.date == bars.index[-1].date()]
+            rows.append({"Ticker": t, "Price": price, "Prev close": prev,
+                         "Change $": price - prev if prev == prev else np.nan,
+                         "Change %": (price / prev - 1) * 100 if prev == prev and prev else np.nan,
+                         "Dollar volume": float((day["Close"] * day["Volume"]).sum())})
+        if prog:
+            prog.progress((i + 1) / len(tl), text=f"Loading {i + 1}/{len(tl)}: {t}")
+    if prog:
+        prog.empty()
+    return pd.DataFrame(rows, columns=["Ticker", "Price", "Prev close", "Change $", "Change %", "Dollar volume"])
+
+
+with tabs[3]:
+    st.caption("Robinhood-style map: **bigger tile = bigger company** (or more money traded), "
+               "**green = up, red = down** – the stronger the colour, the bigger the move. Each tile shows "
+               "the ticker, % change and $ change vs yesterday's close. Tap a sector box to zoom in; "
+               "tap the bar at the top to zoom back out.")
+    h1, h2 = st.columns([2, 1.3])
+    hm_view = h1.radio("Map", ["Watchlist", "S&P 500 sector", "Nasdaq-100", "Russell 2000", "Sector strength",
+                               "Options flow", "Crypto L1/L2"],
+                       horizontal=True, key="hm_view")
+    hm_size = h2.radio("Tile size", ["Market cap", "Dollar volume today"], horizontal=True, key="hm_size",
+                       disabled=hm_view in ("Sector strength", "Options flow", "Crypto L1/L2"),
+                       help="Market cap = company value (like Robinhood). Dollar volume = how much money "
+                            "is trading in it today.")
+    try:
+        sp_hm = load_sp500()
+    except Exception:  # noqa: BLE001
+        sp_hm = pd.DataFrame(columns=["Ticker", "Company", "Sector", "Sub-industry"])
+    hm_list = tickers
+    if hm_view == "S&P 500 sector":
+        if sp_hm.empty:
+            st.warning("Couldn't load the S&P 500 sector list right now.")
+            hm_list = []
+        else:
+            hm_sec = st.selectbox("Sector", sorted(sp_hm["Sector"].unique()), key="hm_sector")
+            hm_list = sp_hm.loc[sp_hm["Sector"] == hm_sec, "Ticker"].tolist()
+            if st.button(f"🟩 Load {len(hm_list)} tickers", type="primary", key="hm_load"):
+                st.session_state["hm_loaded"] = hm_sec
+            if st.session_state.get("hm_loaded") != hm_sec:
+                st.info("Press **Load** – a full sector takes a little while the first time.")
+                hm_list = []
+    elif hm_view in ("Nasdaq-100", "Russell 2000"):
+        hm_top = 100
+        if hm_view == "Russell 2000":
+            hm_top = st.select_slider("How many of the biggest Russell 2000 companies", [50, 100, 150, 200],
+                                      value=100, key="hm_rut_top",
+                                      help="The Russell 2000 has 2,000 small companies – loading all of them live "
+                                           "isn't practical, so the map shows the biggest ones by weight in IWM.")
+        hm_members, hm_note = index_members(hm_view, hm_top)
+        st.caption(hm_note)
+        hm_list = hm_members["Ticker"].tolist()
+        if hm_list:
+            sp_hm = pd.concat([hm_members[["Ticker", "Company", "Sector"]], sp_hm]).drop_duplicates("Ticker")
+            if st.button(f"🟩 Load {len(hm_list)} tickers", type="primary", key="hm_load_idx"):
+                st.session_state["hm_loaded"] = f"{hm_view}:{hm_top}"
+            if st.session_state.get("hm_loaded") != f"{hm_view}:{hm_top}":
+                st.info("Press **Load** – the first load takes a minute; after that it's quicker.")
+                hm_list = []
+    elif hm_view == "Sector strength":
+        hm_list = list(hm.SECTOR_ETFS)
+
+    @st.fragment(run_every=run_every)
+    def heat_map():
+        if not hm_list and hm_view != "Crypto L1/L2":
+            return
+        if hm_view == "Options flow":
+            if not uw.api_key() or demo:
+                st.info("The options-flow map needs Unusual Whales data (live mode).")
+                return
+            fl = load_flow_summary(tuple(hm_list), MIN_FLOW).reset_index(names="Ticker")
+            fl = fl[(fl["Calls $"] + fl["Puts $"]) > 0].assign(Premium=lambda d: d["Calls $"] + d["Puts $"])
+            if fl.empty:
+                st.info("No unusual options flow on your watchlist in the latest session.")
+                return
+            text, hover = hm.flow_tiles(fl)
+            st.plotly_chart(hm.treemap(fl, size="Premium", color="Calls %", text=text, hover=hover,
+                                       center=50, color_range=40, height=560),
+                            width="stretch", theme=None, key="hm_flow")
+            st.caption("Tile size = unusual options premium · **green = mostly calls, red = mostly puts** · "
+                       f"alerts of ${MIN_FLOW:,}+ from the latest session.")
+            return
+        if hm_view == "Crypto L1/L2":
+            cx = load_crypto_layers(demo)
+            no_cap = cx.loc[~(cx["Market cap"] > 0), "Ticker"].tolist()
+            cx = cx[cx["Price"].notna()]
+            if cx.empty:
+                st.warning("No crypto prices right now.")
+                return
+            text, hover = hm.move_tiles(cx)
+            st.plotly_chart(hm.treemap(cx, size="Market cap", color="Change %", text=text, hover=hover,
+                                       group="Group", color_range=5, height=620),
+                            width="stretch", theme=None, key="hm_crypto")
+            st.caption("Layer 1 = base blockchains · Layer 2 = networks built on top of one (mostly Ethereum; "
+                       "Stacks on Bitcoin) · Infrastructure = Chainlink. No meme coins. Change is vs 24 hours ago; "
+                       "colour is full green/red at ±5%." + (f" Not shown (no market cap): {', '.join(no_cap)}."
+                                                             if no_cap else ""))
+            return
+        mv = move_rows(hm_list)
+        if mv.empty:
+            st.warning("No prices for these tickers yet.")
+            return
+        names = dict(zip(sp_hm["Ticker"], sp_hm["Company"]))
+        sectors_of = dict(zip(sp_hm["Ticker"], sp_hm["Sector"]))
+        if hm_view == "Sector strength":
+            mv = mv.assign(Size=1.0, Name=mv["Ticker"].map(hm.SECTOR_ETFS), Group=None)
+            mv["Ticker"] = mv["Ticker"] + " " + mv["Name"].fillna("")
+            group = None
+        else:
+            caps = load_caps(tuple(mv["Ticker"]), demo)
+            mv = mv.assign(**{"Market cap": mv["Ticker"].map(caps), "Name": mv["Ticker"].map(names).fillna(""),
+                              "Group": mv["Ticker"].map(sectors_of).fillna("ETFs & other")})
+            mv["Size"] = mv["Market cap"] if hm_size == "Market cap" else mv["Dollar volume"]
+            group = "Group" if hm_view in ("Watchlist", "Nasdaq-100", "Russell 2000") else None
+            left_out = mv.loc[~(mv["Size"] > 0), "Ticker"].tolist()
+            if left_out:
+                st.caption(f"Not shown (no {hm_size.lower()} available): {', '.join(left_out)}")
+        text, hover = hm.move_tiles(mv)
+        st.plotly_chart(hm.treemap(mv, size="Size", color="Change %", text=text, hover=hover, group=group,
+                                   height=620 if group else 560),
+                        width="stretch", theme=None, key="hm_moves")
+        up, down = int((mv["Change %"] > 0).sum()), int((mv["Change %"] < 0).sum())
+        st.caption(f"{up} up · {down} down · colour is full green/red at ±3% · updated "
+                   f"{data.now_et():%H:%M:%S} ET" + ("" if live else " · turn on Auto-refresh for live updates"))
+        if hm_view != "Sector strength":
+            order = mv.reindex(mv["Change %"].abs().sort_values(ascending=False).index)["Ticker"].tolist()
+            pick_t = st.selectbox("📈 Open a chart", order, index=None, placeholder="Pick a ticker from the map…",
+                                  key="hm_chart_pick")
+            if pick_t:
+                price_chart(pick_t, "5m", list(LEVEL_GROUPS), key=f"hm_chart_{pick_t}", height=460)
+
+    heat_map()
+
+# --------------------------------------------------------------------------- #
 # 0b. Multi-ticker charts with levels
 # --------------------------------------------------------------------------- #
-with tabs[3]:
+with tabs[4]:
     picks = st.multiselect("Tickers", tickers, default=tickers[:4], max_selections=8, key="chart_picks")
     tf, custom = tf_picker("chart_tf", "5m")
     groups = st.multiselect("Lines", list(LEVEL_GROUPS), default=list(LEVEL_GROUPS), key="chart_groups")
@@ -1032,7 +1221,7 @@ with tabs[3]:
 # --------------------------------------------------------------------------- #
 # 1. Sectors: every S&P 500 sector, pre-market scan + company lookup
 # --------------------------------------------------------------------------- #
-with tabs[4]:
+with tabs[5]:
     try:
         sp = load_sp500()
     except Exception as e:  # noqa: BLE001
@@ -1116,7 +1305,7 @@ with tabs[4]:
 # --------------------------------------------------------------------------- #
 # 1a. Pre-market setup vs what happened by the afternoon
 # --------------------------------------------------------------------------- #
-with tabs[5]:
+with tabs[6]:
     st.caption("Your pre-market rules: **PM bias** = last pre-market price vs pre-market VWAP. "
                "**Opening range** = 9:30–10:00. **Behavior** compares the price after 10:00 with "
                "the opening range: **Breakout ▲** = above the 10:00 high, **Breakdown ▼** = below the 10:00 low; "
@@ -1201,7 +1390,7 @@ with tabs[5]:
 # --------------------------------------------------------------------------- #
 # 1b. Chart patterns / setups
 # --------------------------------------------------------------------------- #
-with tabs[6]:
+with tabs[7]:
     c1, c2, c3 = st.columns([1, 1, 2])
     tf = c1.radio("Scan on", ["Daily", "5-minute"], horizontal=True,
                   help="Which candles the pattern scanner looks at. Daily = swing setups. "
@@ -1268,7 +1457,7 @@ with tabs[6]:
 # --------------------------------------------------------------------------- #
 # 1c. Unusual Whales (real-time flow, dark pool, GEX, market tide)
 # --------------------------------------------------------------------------- #
-with tabs[7]:
+with tabs[8]:
     if not uw.api_key():
         st.info("**Connect Unusual Whales:** on the hosted site, open the app's **Settings → Secrets** "
                 "and add `UW_API_KEY = \"your_key\"`. Running on your Mac, it reads the key from "
@@ -1443,7 +1632,7 @@ with tabs[7]:
 # --------------------------------------------------------------------------- #
 # 2. Earnings
 # --------------------------------------------------------------------------- #
-with tabs[9]:
+with tabs[10]:
     st.subheader("Earnings this week")
     today_d = data.now_et().date()
     wk = st.radio("Week", ["This week", "Next week"], horizontal=True, key="earn_week")
@@ -1535,7 +1724,7 @@ with tabs[9]:
 # --------------------------------------------------------------------------- #
 # 3. Swing setups
 # --------------------------------------------------------------------------- #
-with tabs[10]:
+with tabs[11]:
     st.caption(f"Setups: trend pullback, breakout, oversold bounce · stop {stop_atr}×ATR · "
                f"target {target_atr}×ATR · max {max_days} days.")
     with st.spinner("Scanning setups (backtesting each ticker)…"):
@@ -1596,7 +1785,7 @@ with tabs[10]:
 # --------------------------------------------------------------------------- #
 # 4. LEAPS
 # --------------------------------------------------------------------------- #
-with tabs[8]:
+with tabs[9]:
     c1, c2, c3, c4 = st.columns(4)
     lt = c1.selectbox("Ticker", tickers, key="leaps_pick")
     kind = c2.radio("Type", ["call", "put"], horizontal=True)
@@ -1636,7 +1825,7 @@ with tabs[8]:
 # --------------------------------------------------------------------------- #
 # 5. Day trading
 # --------------------------------------------------------------------------- #
-with tabs[11]:
+with tabs[12]:
     with st.expander("ℹ️ How to use this page"):
         st.markdown(
             "1. **Pick a ticker and a timeframe** (1m–5m for the open, 15m–1h for the trend of the day).\n"
@@ -1719,7 +1908,7 @@ with tabs[11]:
 # --------------------------------------------------------------------------- #
 # 6. Plugins: your own scripts
 # --------------------------------------------------------------------------- #
-with tabs[12]:
+with tabs[13]:
     st.caption("Drop a `.py` file into the `plugins/` folder with `TITLE = '…'` and "
                "`def run(tickers): …` – it appears here. See the examples in that folder.")
     plugin_files = sorted(p for p in (ROOT / "plugins").glob("*.py") if not p.name.startswith("_"))

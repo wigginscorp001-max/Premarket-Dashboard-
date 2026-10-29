@@ -281,8 +281,8 @@ def confluence(row: dict, bars: pd.DataFrame, *, min_gap: float = 2.0, min_rvol:
         checks.append((0, f"Small gap {gap:+.2f}%" if gap == gap else "No gap data"))
     rv = row.get("RVOL", NAN)
     vol_strong = rv == rv and rv >= min_rvol
-    vol_text = (f"Rel. volume {rv:.1f}x" if vol_strong else
-                f"Light volume {rv:.1f}x" if rv == rv else "Volume not ready")
+    vol_text = ("Volume not ready" if rv != rv else f"Heavy volume {rv:.1f}x" if vol_strong else
+                f"Light volume {rv:.1f}x" if rv < 1 else f"Normal volume {rv:.1f}x")
     orb, pm = row.get("ORB status", ""), row.get("PM status", "")
     if orb in ("Above ORB high", "Below ORB low"):
         checks.append((1 if orb.startswith("Above") else -1, orb))
