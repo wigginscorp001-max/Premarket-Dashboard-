@@ -343,8 +343,9 @@ def load_flow_summary(tks: tuple, min_prem: int) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_gamma(t: str) -> dict:
-    return sc.gamma_levels(uw.fetch("spot_gex_strike", ticker=t))
+def load_gamma_strikes(t: str) -> pd.DataFrame:
+    """Unusual Whales gamma by strike (refreshed every 5 minutes)."""
+    return uw.fetch("spot_gex_strike", ticker=t)
 
 
 def first_col(df: pd.DataFrame, *names):
@@ -800,13 +801,17 @@ with tabs[1]:
         rows, gamma_missing = [], []
         prog = st.progress(0.0, text="Scanning…") if len(tl) > 12 else None
         for i, t in enumerate(tl):
+            bars = load_intraday(t, demo)
             gm = None
-            if want_gamma and has_uw:
-                try:
-                    gm = load_gamma(t)
-                except Exception:  # noqa: BLE001
-                    gamma_missing.append(t)
-            rows.append(sc.scan_row(t, load_intraday(t, demo), flow.loc[t] if t in flow.index else None, gm,
+            if want_gamma and has_uw and len(bars):
+                try:   # walls/flip are measured from the live price, not UW's snapshot price
+                    gm = sc.gamma_levels(load_gamma_strikes(t), spot=float(bars["Close"].iloc[-1]))
+                except Exception as e:  # noqa: BLE001
+                    gamma_missing.append(f"{t} ({str(e)[:60]})")
+                    gm = None
+                if gm is not None and gm["Gamma"] == "—":
+                    gamma_missing.append(f"{t} (no gamma data returned)")
+            rows.append(sc.scan_row(t, bars, flow.loc[t] if t in flow.index else None, gm,
                                     min_gap=min_gap, min_rvol=min_rvol, min_flow=MIN_FLOW))
             if prog:
                 prog.progress((i + 1) / len(tl), text=f"Scanning {i + 1}/{len(tl)}: {t}")
@@ -869,8 +874,8 @@ with tabs[1]:
         if shown.empty:
             st.info("Nothing matches these filters – lower **Min score** or the gap / volume minimums.")
         if gamma_missing:
-            st.caption(f"Gamma levels didn't load for {', '.join(gamma_missing)} (Unusual Whales busy or no "
-                       "options data) – press 🔄 Refresh all data in a minute to retry.")
+            st.caption(f"⚠️ Gamma levels missing for: {'; '.join(gamma_missing)}. "
+                       "Press 🔄 Refresh all data in a minute to retry.")
         st.caption(f"Updated {data.now_et():%H:%M:%S} ET · flow = unusual options alerts of "
                    f"${MIN_FLOW:,}+ from the latest session"
                    + ("" if live else " · turn on Auto-refresh in the sidebar for live updates"))
