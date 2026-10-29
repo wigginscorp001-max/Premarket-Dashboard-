@@ -17,20 +17,30 @@ def _minutes(df: pd.DataFrame) -> np.ndarray:
     return df.index.hour * 60 + df.index.minute
 
 
+# What price did after 10:00 vs the 9:30-10:00 opening range, and whether that agreed with the
+# pre-market bias (last PM price vs PM VWAP).
+BREAKOUT_WITH = "Breakout ▲ (with bullish PM)"
+BREAKOUT_AGAINST = "Breakout ▲ (against bearish PM)"
+BREAKDOWN_WITH = "Breakdown ▼ (with bearish PM)"
+BREAKDOWN_AGAINST = "Breakdown ▼ (against bullish PM)"
+CHOP = "Choppy – broke both sides"
+INSIDE = "Inside opening range – no breakout"
+
+
 def classify_behavior(pm_bias: str, orb_high: float, orb_low: float, intraday: pd.DataFrame) -> str:
     close_price = intraday["Close"].iloc[-1]
     hi, lo = intraday["High"].max(), intraday["Low"].min()
     if close_price > orb_high and pm_bias == "BULLISH":
-        return "Breakout Continuation"
+        return BREAKOUT_WITH
     if close_price < orb_low and pm_bias == "BEARISH":
-        return "Breakdown Continuation"
+        return BREAKDOWN_WITH
     if hi > orb_high and lo < orb_low:
-        return "Choppy / Range Expansion"
+        return CHOP
     if orb_low <= close_price <= orb_high:
-        return "Inside Opening Range"
+        return INSIDE
     if close_price > orb_high:
-        return "Bullish Reversal"
-    return "Bearish Reversal"
+        return BREAKOUT_AGAINST
+    return BREAKDOWN_AGAINST
 
 
 def analyze_day(day: pd.DataFrame, prev_close: float = NAN) -> dict:
@@ -142,12 +152,12 @@ def odds(hist: pd.DataFrame, bias: str | None = None) -> dict:
     h = hist if bias is None else hist[hist["PM bias"] == bias]
     if h.empty:
         return {}
-    cont = {"BULLISH": "Breakout Continuation", "BEARISH": "Breakdown Continuation"}
+    cont = {"BULLISH": BREAKOUT_WITH, "BEARISH": BREAKDOWN_WITH}
     is_cont = h.apply(lambda r: r["Behavior"].startswith(cont[r["PM bias"]]), axis=1)
     out = {
         "Sessions": len(h),
         "Continuation %": is_cont.mean() * 100,
-        "Chop %": (h["Behavior"] == "Choppy / Range Expansion").mean() * 100,
+        "Chop %": h["Behavior"].str.startswith(CHOP).mean() * 100,
         "Broke ORB high %": h["Broke ORB high"].mean() * 100,
         "Broke ORB low %": h["Broke ORB low"].mean() * 100,
         "Took PM high %": h["Took PM high"].mean() * 100,

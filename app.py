@@ -971,7 +971,8 @@ with tabs[3]:
 with tabs[4]:
     st.caption("Your pre-market rules: **PM bias** = last pre-market price vs pre-market VWAP. "
                "**Opening range** = 9:30–10:00. **Behavior** compares the price after 10:00 with "
-               "the opening range. **Afternoon** = 1:00–4:00 PM.")
+               "the opening range: **Breakout ▲** = above the 10:00 high, **Breakdown ▼** = below the 10:00 low; "
+               "*with* / *against* says whether that matched the pre-market bias. **Afternoon** = 1:00–4:00 PM.")
 
     @st.fragment(run_every=run_every)
     def pm_to_close():
@@ -999,8 +1000,8 @@ with tabs[4]:
     pm_to_close()
 
     st.subheader("History – how each ticker's pre-market setup usually plays out")
-    st.caption("Last ~60 sessions of 5-minute data. Continuation = bullish PM → closes above the "
-               "opening range (or bearish → below).")
+    st.caption("Last ~60 sessions of 5-minute data. Continued = a breakout in the same direction as the "
+               "pre-market bias (bullish PM → above the opening range, bearish PM → below).")
     if st.toggle("Compute history for the whole watchlist", value=False,
                  help="Takes a few seconds per ticker the first time, then it's cached for an hour."):
         rows = []
