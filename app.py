@@ -659,7 +659,9 @@ with tabs[0]:
                 st.info(f"No pre-market trades yet for: {', '.join(missing)}. Thinly traded ETFs "
                         "often don't print until ~8:00 ET – the row will fill once they trade.")
         with right:
-            g = (pm.dropna(subset=["Gap %"]).sort_values("Gap %") if "Gap %" in pm
+            # same order as the table: biggest move (up or down) at the top
+            g = (pm.dropna(subset=["Gap %"]).pipe(lambda d: d.reindex(d["Gap %"].abs().sort_values().index))
+                 if "Gap %" in pm
                  else pd.DataFrame(columns=["Ticker", "Gap %"]))
             gap_usd = g["Gap $"] if "Gap $" in g else pd.Series(np.nan, index=g.index)
             fig = go.Figure(go.Bar(x=g["Gap %"], y=g["Ticker"], orientation="h",
