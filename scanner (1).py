@@ -97,7 +97,7 @@ def gamma_levels(df: pd.DataFrame | None, spot: float = NAN, band: float = 0.10)
     * Regime    – sign of net gamma around the current price: Positive = dealers damp moves
                   (choppy, pinned), Negative = dealers add to moves (trending, bigger ranges)
     * Flip      – nearest price where that net gamma changes sign; an estimate
-    Walls are looked for within ±band of the price.
+    Walls are looked for within ±band of the price (2x that for tickers with wide strike gaps).
     """
     out = {"Call wall": NAN, "Put wall": NAN, "Gamma flip": NAN, "Gamma": "—"}
     if df is None or df.empty or "strike" not in df.columns:
@@ -122,12 +122,13 @@ def gamma_levels(df: pd.DataFrame | None, spot: float = NAN, band: float = 0.10)
     if not np.isfinite(spot) or spot <= 0 or (call.sum() == 0 and put.sum() == 0):
         return out
 
-    near = (strikes >= spot * (1 - band)) & (strikes <= spot * (1 + band))
-    above, below = near & (strikes >= spot), near & (strikes <= spot)
-    for name, side, size in (("Call wall", above, call), ("Put wall", below, put)):
-        pick = side if size[side].sum() > 0 else near          # nothing on that side: use the band
-        if size[pick].sum() > 0:
-            out[name] = float(strikes[size[pick].idxmax()])
+    for name, size, side in (("Call wall", call, strikes >= spot), ("Put wall", put, strikes <= spot)):
+        # look on the wall's own side of the price; widen the search for tickers with wide strike gaps
+        for reach in (band, 2 * band, np.inf):
+            pick = side & (np.abs(strikes / spot - 1) <= reach)
+            if size[pick].sum() > 0:
+                out[name] = float(strikes[size[pick].idxmax()])
+                break
 
     # Net gamma profile across nearby prices: each strike's net gamma spread as a bell curve
     # (~3% of the price wide), summed. Its sign at the price is the regime; where it crosses
