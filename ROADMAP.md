@@ -4,7 +4,7 @@
 - **Scanner** (BUILT 29/Oct/2026, 🔎 Scanner tab) on the page and the app, built on Unusual Whales data:
   gap %, relative volume, pre-market high/low breaks, opening-range breakouts,
   unusual options flow; watchlist + whole sectors.
-- **Confluence check (quick, phone-friendly):** one card per ticker showing which signals agree
+- **Confluence check (BUILT 29/Oct/2026, 🎯 Confluence tab; quick, phone-friendly):** one card per ticker showing which signals agree
   (trend vs EMA 9/200, VWAP, MACD, gap, relative volume, PM high/low, opening-range break,
   options flow, nearest support/resistance) with a simple score, e.g. "6 of 8 bullish".
   Used as a second opinion while looking at other charts or on the go. Short plain-English hints, not a full guide.

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import html
 import os
 import importlib.util
 import traceback
@@ -575,7 +576,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-SECTIONS = ["🌅 Pre-Market", "🔎 Scanner", "📊 Charts & Levels", "🗂️ Sectors", "🧭 PM → Close", "📐 Setups & Patterns",
+SECTIONS = ["🌅 Pre-Market", "🔎 Scanner", "🎯 Confluence", "📊 Charts & Levels", "🗂️ Sectors", "🧭 PM → Close", "📐 Setups & Patterns",
             "🐋 Options Flow", "🎯 Options & LEAPS", "📅 Earnings", "📈 Swing Odds",
             "⚡ Day Trading", "🧩 My Scripts"]
 
@@ -729,6 +730,40 @@ with tabs[0]:
 # --------------------------------------------------------------------------- #
 # 0a. Scanner
 # --------------------------------------------------------------------------- #
+MIN_FLOW = 100_000   # options-flow alerts of at least this premium count as unusual
+
+
+def scan_rows(tl, want_gamma: bool, min_gap: float, min_rvol: float) -> tuple[list[dict], list[str]]:
+    """One scanner row per ticker (gap, volume, PM/ORB, flow, gamma), with a progress bar for long lists."""
+    has_uw = bool(uw.api_key()) and not demo
+    flow = pd.DataFrame()
+    if has_uw:
+        try:
+            flow = load_flow_summary(tuple(tl), MIN_FLOW)
+        except Exception as e:  # noqa: BLE001
+            st.caption(f"Options flow unavailable ({e}).")
+    rows, gamma_missing = [], []
+    prog = st.progress(0.0, text="Scanning…") if len(tl) > 12 else None
+    for i, t in enumerate(tl):
+        bars = load_intraday(t, demo)
+        gm = None
+        if want_gamma and has_uw and len(bars):
+            try:   # walls/flip are measured from the live price, not UW's snapshot price
+                gm = sc.gamma_levels(load_gamma_strikes(t), spot=float(bars["Close"].iloc[-1]))
+            except Exception as e:  # noqa: BLE001
+                gamma_missing.append(f"{t} ({str(e)[:60]})")
+                gm = None
+            if gm is not None and gm["Gamma"] == "—":
+                gamma_missing.append(f"{t} (no gamma data returned)")
+        rows.append(sc.scan_row(t, bars, flow.loc[t] if t in flow.index else None, gm,
+                                min_gap=min_gap, min_rvol=min_rvol, min_flow=MIN_FLOW))
+        if prog:
+            prog.progress((i + 1) / len(tl), text=f"Scanning {i + 1}/{len(tl)}: {t}")
+    if prog:
+        prog.empty()
+    return rows, gamma_missing
+
+
 SCAN_HELP = {
     "Score": "How many of the 5 signals point the same way (gap, relative volume, PM range, opening range, "
              "options flow). Relative volume counts for both directions. 4–5 = strong agreement.",
@@ -778,7 +813,6 @@ with tabs[1]:
                                help="Relative volume at least this high counts as a signal. 2.0 = twice normal.")
     min_score = f4.slider("Min score", 0, 5, 0, key="scan_score",
                           help="Hide tickers with fewer agreeing signals. 0 = show everything.")
-    MIN_FLOW = 100_000
 
     if scope == "Watchlist":
         st.session_state["scan_for"] = tuple(universe)
@@ -792,31 +826,7 @@ with tabs[1]:
             st.info("Pick what to scan, then press **Scan**.")
             return
         has_uw = bool(uw.api_key()) and not demo
-        flow = pd.DataFrame()
-        if has_uw:
-            try:
-                flow = load_flow_summary(tuple(tl), MIN_FLOW)
-            except Exception as e:  # noqa: BLE001
-                st.caption(f"Options flow unavailable ({e}).")
-        rows, gamma_missing = [], []
-        prog = st.progress(0.0, text="Scanning…") if len(tl) > 12 else None
-        for i, t in enumerate(tl):
-            bars = load_intraday(t, demo)
-            gm = None
-            if want_gamma and has_uw and len(bars):
-                try:   # walls/flip are measured from the live price, not UW's snapshot price
-                    gm = sc.gamma_levels(load_gamma_strikes(t), spot=float(bars["Close"].iloc[-1]))
-                except Exception as e:  # noqa: BLE001
-                    gamma_missing.append(f"{t} ({str(e)[:60]})")
-                    gm = None
-                if gm is not None and gm["Gamma"] == "—":
-                    gamma_missing.append(f"{t} (no gamma data returned)")
-            rows.append(sc.scan_row(t, bars, flow.loc[t] if t in flow.index else None, gm,
-                                    min_gap=min_gap, min_rvol=min_rvol, min_flow=MIN_FLOW))
-            if prog:
-                prog.progress((i + 1) / len(tl), text=f"Scanning {i + 1}/{len(tl)}: {t}")
-        if prog:
-            prog.empty()
+        rows, gamma_missing = scan_rows(tl, want_gamma, min_gap, min_rvol)
         res = pd.DataFrame(rows)
         if "Gap %" not in res:
             st.warning("No data for these tickers yet.")
@@ -897,9 +907,107 @@ with tabs[1]:
             "Not financial advice.")
 
 # --------------------------------------------------------------------------- #
+# 0a2. Confluence cards
+# --------------------------------------------------------------------------- #
+CARD_CSS = """
+<style>
+.cc-head { display:flex; justify-content:space-between; align-items:baseline; gap:8px; flex-wrap:wrap; }
+.cc-tk { font-weight:700; font-size:18px; color:#fff; }
+.cc-px { font: 13px ui-monospace, monospace; color:#cbd5e1; }
+.cc-dir { font-weight:700; font-size:14px; padding:2px 8px; border-radius:999px; }
+.cc-dir.up { color:#34d399; background:rgba(16,185,129,.15); }
+.cc-dir.down { color:#f87171; background:rgba(239,68,68,.15); }
+.cc-dir.mixed { color:#fbbf24; background:rgba(245,158,11,.15); }
+.cc-list { margin:8px 0 4px; padding:0; list-style:none; font-size:13px; line-height:1.55; }
+.cc-note { font-size:12px; color:#94a3b8; border-top:1px solid #1f2937; padding-top:6px; margin-top:4px; }
+</style>
+"""
+
+
+def card_html(c: dict) -> str:
+    """One confluence card as HTML."""
+    lead = 1 if c["Direction"].startswith("▲") else -1 if c["Direction"].startswith("▼") else 0
+    cls = {1: "up", -1: "down", 0: "mixed"}[lead]
+    agree = c["Bull"] if lead > 0 else c["Bear"] if lead < 0 else max(c["Bull"], c["Bear"])
+    label = (f"{c['Direction']} · {agree} of {c['Total']}" if lead
+             else f"◆ Mixed · {c['Bull']} up / {c['Bear']} down")
+
+    def icon(v):
+        if v == 0:
+            return "⚠️"
+        if lead == 0:
+            return "🟢" if v > 0 else "🔴"
+        return "✅" if v == lead else "❌"
+
+    items = "".join(f"<li>{icon(v)} {html.escape(text)}</li>" for v, text in c["Checks"])
+    chg = c["Change %"]
+    px = f"${c['Price']:,.2f}" + (f" · {chg:+.2f}%" if chg == chg else "") if c["Price"] == c["Price"] else "—"
+    notes = "<br>".join(html.escape(n) for n in c["Notes"])
+    return (f"<div class='cc-head'><span class='cc-tk'>{html.escape(c['Ticker'])}</span>"
+            f"<span class='cc-px'>{px}</span><span class='cc-dir {cls}'>{label}</span></div>"
+            f"<ul class='cc-list'>{items}</ul>" + (f"<div class='cc-note'>{notes}</div>" if notes else ""))
+
+
+with tabs[2]:
+    st.caption("A quick second opinion per ticker. **8 checks**: ✅ agrees with the card's direction, "
+               "❌ against it, ⚠️ neutral. The count is how many agree – **not** a buy or sell signal.")
+    k1, k2 = st.columns([1.4, 2])
+    cc_scope = k1.radio("Cards for", ["Watchlist", "Tickers I type"], horizontal=True, key="cc_scope")
+    cc_list = tickers if cc_scope == "Watchlist" else data.read_watchlist(
+        k2.text_input("Tickers", "", placeholder="e.g. NVDA, AMD, SMCI", key="cc_typed"))[0]
+    f1, f2 = st.expander("⚙️ Filters – direction, how many agree").columns(2)
+    cc_show = f1.selectbox("Show", ["All", "Bullish", "Bearish", "Mixed"], key="cc_show")
+    cc_min = f2.slider("At least this many agree", 0, 8, 0, key="cc_min",
+                       help="Hide cards where fewer checks agree with the card's direction. 0 = show all.")
+    st.markdown(CARD_CSS, unsafe_allow_html=True)
+
+    @st.fragment(run_every=run_every)
+    def confluence_cards():
+        if not cc_list:
+            st.info("Type at least one ticker.")
+            return
+        gap_min = st.session_state.get("scan_gap", 2.0)
+        rvol_min = st.session_state.get("scan_rvol", 2.0)
+        rows, _ = scan_rows(cc_list, True, gap_min, rvol_min)
+        cards = []
+        for r in rows:
+            if "Price" not in r:          # no data for this ticker
+                continue
+            bars = load_intraday(r["Ticker"], demo)
+            cards.append(sc.confluence(r, tvchart.add_indicators(bars) if len(bars) else bars,
+                                       min_gap=gap_min, min_rvol=rvol_min, min_flow=MIN_FLOW))
+        for c in cards:
+            c["Agree"] = c["Bull"] if c["Direction"].startswith("▲") else c["Bear"] if c["Direction"].startswith("▼") \
+                else max(c["Bull"], c["Bear"])
+        if cc_show != "All":
+            cards = [c for c in cards if c["Direction"].startswith({"Bullish": "▲", "Bearish": "▼", "Mixed": "◆"}[cc_show])]
+        cards = [c for c in cards if c["Agree"] >= cc_min]
+        cards.sort(key=lambda c: (c["Agree"], not c["Direction"].startswith("◆")), reverse=True)
+        missing = [r["Ticker"] for r in rows if "Price" not in r]
+        st.caption(f"{len(cards)} cards · strongest agreement first · updated {data.now_et():%H:%M:%S} ET"
+                   + (f" · no data: {', '.join(missing)}" if missing else ""))
+        if not cards:
+            st.info("No cards match – lower **At least this many agree** or choose **All**.")
+            return
+        per_row = 3
+        for i in range(0, len(cards), per_row):
+            cols = st.columns(per_row)
+            for col, c in zip(cols, cards[i:i + per_row]):
+                with col.container(border=True):
+                    st.markdown(card_html(c), unsafe_allow_html=True)
+                    t = c["Ticker"]
+                    is_open = st.session_state.get("cc_chart") == t
+                    st.button("Hide chart" if is_open else "📈 Chart", key=f"cc_btn_{t}", width="stretch",
+                              on_click=lambda t=t, o=is_open: st.session_state.update(cc_chart=None if o else t))
+                    if is_open:
+                        price_chart(t, "5m", list(LEVEL_GROUPS), key=f"cc_chart_{t}", height=380)
+
+    confluence_cards()
+
+# --------------------------------------------------------------------------- #
 # 0b. Multi-ticker charts with levels
 # --------------------------------------------------------------------------- #
-with tabs[2]:
+with tabs[3]:
     picks = st.multiselect("Tickers", tickers, default=tickers[:4], max_selections=8, key="chart_picks")
     tf, custom = tf_picker("chart_tf", "5m")
     groups = st.multiselect("Lines", list(LEVEL_GROUPS), default=list(LEVEL_GROUPS), key="chart_groups")
@@ -921,7 +1029,7 @@ with tabs[2]:
 # --------------------------------------------------------------------------- #
 # 1. Sectors: every S&P 500 sector, pre-market scan + company lookup
 # --------------------------------------------------------------------------- #
-with tabs[3]:
+with tabs[4]:
     try:
         sp = load_sp500()
     except Exception as e:  # noqa: BLE001
@@ -1005,7 +1113,7 @@ with tabs[3]:
 # --------------------------------------------------------------------------- #
 # 1a. Pre-market setup vs what happened by the afternoon
 # --------------------------------------------------------------------------- #
-with tabs[4]:
+with tabs[5]:
     st.caption("Your pre-market rules: **PM bias** = last pre-market price vs pre-market VWAP. "
                "**Opening range** = 9:30–10:00. **Behavior** compares the price after 10:00 with "
                "the opening range: **Breakout ▲** = above the 10:00 high, **Breakdown ▼** = below the 10:00 low; "
@@ -1090,7 +1198,7 @@ with tabs[4]:
 # --------------------------------------------------------------------------- #
 # 1b. Chart patterns / setups
 # --------------------------------------------------------------------------- #
-with tabs[5]:
+with tabs[6]:
     c1, c2, c3 = st.columns([1, 1, 2])
     tf = c1.radio("Scan on", ["Daily", "5-minute"], horizontal=True,
                   help="Which candles the pattern scanner looks at. Daily = swing setups. "
@@ -1157,7 +1265,7 @@ with tabs[5]:
 # --------------------------------------------------------------------------- #
 # 1c. Unusual Whales (real-time flow, dark pool, GEX, market tide)
 # --------------------------------------------------------------------------- #
-with tabs[6]:
+with tabs[7]:
     if not uw.api_key():
         st.info("**Connect Unusual Whales:** on the hosted site, open the app's **Settings → Secrets** "
                 "and add `UW_API_KEY = \"your_key\"`. Running on your Mac, it reads the key from "
@@ -1332,7 +1440,7 @@ with tabs[6]:
 # --------------------------------------------------------------------------- #
 # 2. Earnings
 # --------------------------------------------------------------------------- #
-with tabs[8]:
+with tabs[9]:
     st.subheader("Earnings this week")
     today_d = data.now_et().date()
     wk = st.radio("Week", ["This week", "Next week"], horizontal=True, key="earn_week")
@@ -1424,7 +1532,7 @@ with tabs[8]:
 # --------------------------------------------------------------------------- #
 # 3. Swing setups
 # --------------------------------------------------------------------------- #
-with tabs[9]:
+with tabs[10]:
     st.caption(f"Setups: trend pullback, breakout, oversold bounce · stop {stop_atr}×ATR · "
                f"target {target_atr}×ATR · max {max_days} days.")
     with st.spinner("Scanning setups (backtesting each ticker)…"):
@@ -1471,21 +1579,21 @@ with tabs[9]:
                    f"occurrences; under {MIN_SIGNALS} is a small sample. Past results don't guarantee future ones.")
 
         sp = st.selectbox("Chart & setup history", [x["Ticker"] for x in scans], key="swing_pick")
-        sc = next(s for s in scans if s["Ticker"] == sp)
-        st.dataframe(pd.DataFrame(sc["_stats"]).T.rename(columns={"n": "Signals", "win_rate": "Win rate",
+        pick = next(s for s in scans if s["Ticker"] == sp)
+        st.dataframe(pd.DataFrame(pick["_stats"]).T.rename(columns={"n": "Signals", "win_rate": "Win rate",
                                                                   "avg_ret": "Avg return"})
                      .style.format({"Win rate": "{:.0%}", "Avg return": "{:+.2%}", "Signals": "{:.0f}"},
                                    na_rep="—"), width="stretch")
         stf, scustom = tf_picker("swing_tf", "Daily")
         price_chart(sp, stf, ["Support / resistance"], key=f"swing_{sp}_{stf}", custom=scustom,
-                    extra_levels=[{"price": sc["Stop"], "title": "Stop", "color": DOWN, "style": "dash"},
-                                  {"price": sc["Target"], "title": "Target", "color": UP, "style": "dash"}])
+                    extra_levels=[{"price": pick["Stop"], "title": "Stop", "color": DOWN, "style": "dash"},
+                                  {"price": pick["Target"], "title": "Target", "color": UP, "style": "dash"}])
         st.caption("Stop and target come from the daily setup scan above.")
 
 # --------------------------------------------------------------------------- #
 # 4. LEAPS
 # --------------------------------------------------------------------------- #
-with tabs[7]:
+with tabs[8]:
     c1, c2, c3, c4 = st.columns(4)
     lt = c1.selectbox("Ticker", tickers, key="leaps_pick")
     kind = c2.radio("Type", ["call", "put"], horizontal=True)
@@ -1525,7 +1633,7 @@ with tabs[7]:
 # --------------------------------------------------------------------------- #
 # 5. Day trading
 # --------------------------------------------------------------------------- #
-with tabs[10]:
+with tabs[11]:
     with st.expander("ℹ️ How to use this page"):
         st.markdown(
             "1. **Pick a ticker and a timeframe** (1m–5m for the open, 15m–1h for the trend of the day).\n"
@@ -1608,7 +1716,7 @@ with tabs[10]:
 # --------------------------------------------------------------------------- #
 # 6. Plugins: your own scripts
 # --------------------------------------------------------------------------- #
-with tabs[11]:
+with tabs[12]:
     st.caption("Drop a `.py` file into the `plugins/` folder with `TITLE = '…'` and "
                "`def run(tickers): …` – it appears here. See the examples in that folder.")
     plugin_files = sorted(p for p in (ROOT / "plugins").glob("*.py") if not p.name.startswith("_"))

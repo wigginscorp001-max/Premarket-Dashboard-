@@ -238,3 +238,86 @@ def scan_row(ticker: str, bars: pd.DataFrame, flow: pd.Series | None = None, gam
     })
     row.update(gamma or {})
     return row
+
+
+# --------------------------------------------------------------------------- #
+# Confluence card: 8 checks that either agree or disagree
+# --------------------------------------------------------------------------- #
+def confluence(row: dict, bars: pd.DataFrame, *, min_gap: float = 2.0, min_rvol: float = 2.0,
+               min_flow: float = 100_000) -> dict:
+    """Eight quick checks for one ticker, each bullish (+1), bearish (-1) or neutral (0).
+
+    `row` is a scan_row() result; `bars` are the same 5-minute bars with EMA 9 / EMA 200 /
+    MACD columns (tvchart.add_indicators). Relative volume doesn't pick a side: when it is
+    high it backs whichever side is ahead.
+    """
+    checks: list[tuple[int, str]] = []
+    price = row.get("Price", NAN)
+    last = bars.iloc[-1] if bars is not None and len(bars) else None
+
+    def vs_line(name: str, col: str):
+        v = last.get(col, NAN) if last is not None else NAN
+        if not (v == v and price == price):
+            checks.append((0, f"{name} not ready"))
+        else:
+            checks.append((1, f"Above {name} ({v:,.2f})") if price >= v else (-1, f"Below {name} ({v:,.2f})"))
+
+    vs_line("EMA 9", "EMA9")
+    vs_line("EMA 200", "EMA200")
+    vwap = row.get("VWAP", NAN)
+    if vwap == vwap and price == price:
+        checks.append((1, f"Above VWAP ({vwap:,.2f})") if price >= vwap else (-1, f"Below VWAP ({vwap:,.2f})"))
+    else:
+        checks.append((0, "VWAP not ready"))
+    m, s = (last.get("MACD", NAN), last.get("Signal", NAN)) if last is not None else (NAN, NAN)
+    if m == m and s == s:
+        checks.append((1, "MACD above signal") if m >= s else (-1, "MACD below signal"))
+    else:
+        checks.append((0, "MACD not ready"))
+    gap = row.get("Gap %", NAN)
+    if gap == gap and abs(gap) >= min_gap:
+        checks.append((1 if gap > 0 else -1, f"Gap {'up' if gap > 0 else 'down'} {gap:+.1f}%"))
+    else:
+        checks.append((0, f"Small gap {gap:+.1f}%" if gap == gap else "No gap data"))
+    rv = row.get("RVOL", NAN)
+    vol_strong = rv == rv and rv >= min_rvol
+    vol_text = (f"Rel. volume {rv:.1f}x" if vol_strong else
+                f"Light volume {rv:.1f}x" if rv == rv else "Volume not ready")
+    orb, pm = row.get("ORB status", ""), row.get("PM status", "")
+    if orb in ("Above ORB high", "Below ORB low"):
+        checks.append((1 if orb.startswith("Above") else -1, orb))
+    elif pm in ("Above PM high", "Below PM low", "At PM high", "At PM low"):
+        checks.append((1 if "high" in pm else -1, pm))
+    else:
+        checks.append((0, orb if orb == "Inside ORB" else pm or "No breakout yet"))
+    calls_pct = row.get("Calls %", NAN)
+    total = (row.get("Calls $", 0) or 0) + (row.get("Puts $", 0) or 0)
+    if calls_pct == calls_pct and total >= min_flow and calls_pct >= 60:
+        checks.append((1, f"Flow {calls_pct:.0f}% calls"))
+    elif calls_pct == calls_pct and total >= min_flow and calls_pct <= 40:
+        checks.append((-1, f"Flow {100 - calls_pct:.0f}% puts"))
+    elif calls_pct == calls_pct and total >= min_flow:
+        checks.append((0, f"Flow mixed ({calls_pct:.0f}% calls)"))
+    else:
+        checks.append((0, "No unusual flow"))
+
+    bull = sum(1 for v, _ in checks if v > 0)
+    bear = sum(1 for v, _ in checks if v < 0)
+    lead = 1 if bull > bear else -1 if bear > bull else 0
+    checks.insert(5, ((lead if vol_strong else 0), vol_text))     # volume backs the leader
+    bull, bear = bull + (vol_strong and lead > 0), bear + (vol_strong and lead < 0)
+    direction = "▲ Bullish" if lead > 0 else "▼ Bearish" if lead < 0 else "◆ Mixed"
+
+    # Gamma context (not scored): regime and how close the walls are
+    notes = []
+    if row.get("Gamma") in ("Positive", "Negative"):
+        notes.append(f"{row['Gamma']} gamma – " + ("choppy / pinned" if row["Gamma"] == "Positive"
+                                                   else "moves can run"))
+    for name in ("Call wall", "Put wall"):
+        w = row.get(name, NAN)
+        if w == w and price == price and price:
+            d = (w / price - 1) * 100
+            notes.append(f"{name} {w:,.2f} ({d:+.1f}%)" + (" ⚠️ close" if abs(d) <= 1 else ""))
+    return {"Ticker": row["Ticker"], "Price": price, "Change %": row.get("Change %", NAN),
+            "Direction": direction, "Bull": int(bull), "Bear": int(bear), "Total": len(checks),
+            "Checks": checks, "Notes": notes}
