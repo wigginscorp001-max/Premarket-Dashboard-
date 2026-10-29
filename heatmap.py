@@ -76,15 +76,16 @@ def treemap(df: pd.DataFrame, *, size: str, color: str, text: list[str], hover: 
     return fig
 
 
-def move_tiles(df: pd.DataFrame) -> tuple[list[str], list[str]]:
-    """Tile text and hover text for a price-move map: ticker, % and $ change."""
+def move_tiles(df: pd.DataFrame, unit: str = "share") -> tuple[list[str], list[str]]:
+    """Tile text and hover text for a price-move map: ticker, % change and $ change per share (or coin)."""
+    short = {"share": "sh", "coin": "coin"}.get(unit, unit)
     text, hover = [], []
     for _, r in df.iterrows():
         pct = r["Change %"]
         p = f"{pct:+.2f}%" if pct == pct else "—"
-        text.append(f"<b>{r['Ticker']}</b><br>{p}<br>{usd(r['Change $'])}")
+        text.append(f"<b>{r['Ticker']}</b><br>{p}<br>{usd(r['Change $'])}/{short}")
         hover.append(f"<b>{r['Ticker']}</b>" + (f" · {r['Name']}" if r.get("Name") else "")
-                     + f"<br>Price {r['Price']:,.2f}<br>Change {p} ({usd(r['Change $'])})"
+                     + f"<br>Price {r['Price']:,.2f}<br>Change {p} ({usd(r['Change $'])} per {unit})"
                      + f"<br>Market cap {money(r.get('Market cap', np.nan))}")
     return text, hover
 

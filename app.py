@@ -321,7 +321,7 @@ def index_members(name: str, top: int = 100) -> tuple[pd.DataFrame, str]:
     """(members, note) for "Nasdaq-100" or "Russell 2000"; empty frame and the reason on failure."""
     try:
         if name == "Nasdaq-100":
-            return load_ndx(), "Nasdaq-100 list: Wikipedia"
+            return load_ndx(), f"Nasdaq-100 – {len(load_ndx())} companies (QQQ holdings from Unusual Whales, or Wikipedia's list)"
         df, src = load_rut(top)
         return df, f"Russell 2000 – top {len(df)} by weight in IWM · source: {src}"
     except Exception as e:  # noqa: BLE001
@@ -1078,14 +1078,14 @@ def move_rows(tl) -> pd.DataFrame:
 with tabs[3]:
     st.caption("Robinhood-style map: **bigger tile = bigger company** (or more money traded), "
                "**green = up, red = down** – the stronger the colour, the bigger the move. Each tile shows "
-               "the ticker, % change and $ change vs yesterday's close. Tap a sector box to zoom in; "
+               "the ticker, % change and $ change **per share** vs yesterday's close. Tap a sector box to zoom in; "
                "tap the bar at the top to zoom back out.")
-    h1, h2 = st.columns([2, 1.3])
-    hm_view = h1.radio("Map", ["Watchlist", "S&P 500 sector", "Nasdaq-100", "Russell 2000", "Sector strength",
-                               "Options flow", "Crypto L1/L2"],
+    # map choices get their own full-width row so they stay on one line
+    hm_view = st.radio("Map", ["Watchlist", "S&P 500 sector", "Nasdaq-100", "Russell 2000", "Sector strength",
+                               "Options flow", "Crypto"],
                        horizontal=True, key="hm_view")
-    hm_size = h2.radio("Tile size", ["Market cap", "Dollar volume today"], horizontal=True, key="hm_size",
-                       disabled=hm_view in ("Sector strength", "Options flow", "Crypto L1/L2"),
+    hm_size = st.radio("Tile size", ["Market cap", "Dollar volume today"], horizontal=True, key="hm_size",
+                       disabled=hm_view in ("Sector strength", "Options flow", "Crypto"),
                        help="Market cap = company value (like Robinhood). Dollar volume = how much money "
                             "is trading in it today.")
     try:
@@ -1127,7 +1127,7 @@ with tabs[3]:
 
     @st.fragment(run_every=run_every)
     def heat_map():
-        if not hm_list and hm_view != "Crypto L1/L2":
+        if not hm_list and hm_view != "Crypto":
             return
         if hm_view == "Options flow":
             if not uw.api_key() or demo:
@@ -1145,21 +1145,20 @@ with tabs[3]:
             st.caption("Tile size = unusual options premium · **green = mostly calls, red = mostly puts** · "
                        f"alerts of ${MIN_FLOW:,}+ from the latest session.")
             return
-        if hm_view == "Crypto L1/L2":
+        if hm_view == "Crypto":
             cx = load_crypto_layers(demo)
             no_cap = cx.loc[~(cx["Market cap"] > 0), "Ticker"].tolist()
             cx = cx[cx["Price"].notna()]
             if cx.empty:
                 st.warning("No crypto prices right now.")
                 return
-            text, hover = hm.move_tiles(cx)
+            text, hover = hm.move_tiles(cx, unit="coin")
             st.plotly_chart(hm.treemap(cx, size="Market cap", color="Change %", text=text, hover=hover,
-                                       group="Group", color_range=5, height=620),
+                                       color_range=5, height=560),
                             width="stretch", theme=None, key="hm_crypto")
-            st.caption("Layer 1 = base blockchains · Layer 2 = networks built on top of one (mostly Ethereum; "
-                       "Stacks on Bitcoin) · Infrastructure = Chainlink. No meme coins. Change is vs 24 hours ago; "
-                       "colour is full green/red at ±5%." + (f" Not shown (no market cap): {', '.join(no_cap)}."
-                                                             if no_cap else ""))
+            st.caption("Crypto assets – major blockchains and their networks, no meme coins. $ change is per coin, "
+                       "vs 24 hours ago; colour is full green/red at ±5%."
+                       + (f" Not shown (no market cap): {', '.join(no_cap)}." if no_cap else ""))
             return
         mv = move_rows(hm_list)
         if mv.empty:

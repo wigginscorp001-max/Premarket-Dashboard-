@@ -35,9 +35,11 @@ def _clean(tickers: pd.Series) -> pd.Series:
 def parse_nasdaq100(html: str) -> pd.DataFrame:
     """The components table from Wikipedia's Nasdaq-100 page."""
     for t in pd.read_html(StringIO(html)):
-        cols = {str(c).strip(): c for c in t.columns}
-        tcol = next((cols[c] for c in ("Ticker", "Symbol") if c in cols), None)
-        if tcol is None or not 90 <= len(t) <= 110:
+        if isinstance(t.columns, pd.MultiIndex):
+            t.columns = [c[-1] for c in t.columns]
+        cols = {str(c).strip().split("[")[0].strip(): c for c in t.columns}
+        tcol = next((cols[c] for c in ("Ticker", "Symbol", "Ticker symbol") if c in cols), None)
+        if tcol is None or not 90 <= len(t) <= 120:
             continue
         name = next((cols[c] for c in ("Company", "Security", "Name") if c in cols), tcol)
         sector = next((cols[c] for c in ("GICS Sector", "ICB Industry", "Sector") if c in cols), None)
@@ -50,7 +52,16 @@ def parse_nasdaq100(html: str) -> pd.DataFrame:
 
 
 def nasdaq100() -> pd.DataFrame:
-    """Nasdaq-100 members with sector (from Wikipedia's maintained list)."""
+    """Nasdaq-100 members: Unusual Whales QQQ holdings first, then Wikipedia's list."""
+    try:
+        import uw
+        if uw.api_key():
+            df = parse_uw_holdings(uw.get("/api/etfs/QQQ/holdings"))
+            df = df[df["Ticker"].str.fullmatch(r"[A-Z][A-Z\-]{0,5}")].drop_duplicates("Ticker")
+            if len(df) >= 90:
+                return df.drop(columns="Weight").sort_values(["Sector", "Ticker"]).reset_index(drop=True)
+    except Exception:  # noqa: BLE001
+        pass
     return parse_nasdaq100(requests.get(NDX_URL, headers=UA, timeout=30).text)
 
 

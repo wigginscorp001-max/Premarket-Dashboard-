@@ -1,5 +1,10 @@
 # Roadmap – Wiggins Investments LLC
 
+## DATA POLICY (locked 29/Oct/2026)
+- No free/scraped data sources (no Yahoo Finance, Wikipedia, iShares downloads, etc.).
+- Unusual Whales is the primary feed. If UW can't provide something, tell Sa'Rah El and recommend
+  the right paid subscription (stocks, options, futures, forex, crypto) for the site and app.
+
 ## Website / app – planned
 - **Scanner** (BUILT 29/Oct/2026, 🔎 Scanner tab) on the page and the app, built on Unusual Whales data:
   gap %, relative volume, pre-market high/low breaks, opening-range breakouts,
@@ -52,3 +57,9 @@
 - Heat Map + Scanner can load the Nasdaq-100 (Wikipedia list) and the biggest 50–200 Russell 2000
   companies by IWM weight (Unusual Whales ETF holdings if the plan includes them, else iShares download).
 - Pre-Market cards add live index ETFs: SPY, QQQ, IWM, DIA, SMH.
+
+## UW coverage check (29/Oct/2026) – all HTTP 200 on Sa'Rah's plan
+- stock info (sector, marketcap), daily candles (755 rows), earnings (report_date/time, expected move),
+  option contracts (greeks, OI, volume), ETF holdings QQQ (102) – ready to replace Yahoo/Wikipedia.
+- SPY holdings returned only 250 rows (not ~503) – check paging before using it for the S&P 500 list.
+- Not covered by UW: futures, VIX/10Y/DXY, crypto, forex → paid feeds when Sa'Rah decides.
