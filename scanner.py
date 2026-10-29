@@ -276,9 +276,9 @@ def confluence(row: dict, bars: pd.DataFrame, *, min_gap: float = 2.0, min_rvol:
         checks.append((0, "MACD not ready"))
     gap = row.get("Gap %", NAN)
     if gap == gap and abs(gap) >= min_gap:
-        checks.append((1 if gap > 0 else -1, f"Gap {'up' if gap > 0 else 'down'} {gap:+.1f}%"))
+        checks.append((1 if gap > 0 else -1, f"Gap {'up' if gap > 0 else 'down'} {gap:+.2f}%"))
     else:
-        checks.append((0, f"Small gap {gap:+.1f}%" if gap == gap else "No gap data"))
+        checks.append((0, f"Small gap {gap:+.2f}%" if gap == gap else "No gap data"))
     rv = row.get("RVOL", NAN)
     vol_strong = rv == rv and rv >= min_rvol
     vol_text = (f"Rel. volume {rv:.1f}x" if vol_strong else

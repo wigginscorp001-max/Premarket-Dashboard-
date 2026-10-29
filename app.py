@@ -999,8 +999,11 @@ with tabs[2]:
                     is_open = st.session_state.get("cc_chart") == t
                     st.button("Hide chart" if is_open else "📈 Chart", key=f"cc_btn_{t}", width="stretch",
                               on_click=lambda t=t, o=is_open: st.session_state.update(cc_chart=None if o else t))
-                    if is_open:
-                        price_chart(t, "5m", list(LEVEL_GROUPS), key=f"cc_chart_{t}", height=380)
+            # the opened chart goes full width under its row, so it isn't squeezed into the card
+            opened = st.session_state.get("cc_chart")
+            if opened in [c["Ticker"] for c in cards[i:i + per_row]]:
+                with st.container(border=True):
+                    price_chart(opened, "5m", list(LEVEL_GROUPS), key=f"cc_chart_{opened}", height=460)
 
     confluence_cards()
 
