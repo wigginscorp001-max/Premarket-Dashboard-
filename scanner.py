@@ -92,12 +92,12 @@ def flow_summary(alerts: pd.DataFrame | None, today=None) -> pd.DataFrame:
 def gamma_levels(df: pd.DataFrame | None, spot: float = NAN, band: float = 0.10) -> dict:
     """Call wall, put wall, gamma flip and regime from gamma-by-strike data.
 
-    * Call wall – strike with the most call gamma (often acts as resistance)
-    * Put wall  – strike with the most put gamma (often acts as support)
-    * Flip      – where cumulative net gamma (low strike → high) crosses zero; an estimate
-    * Regime    – Positive above the flip (dealers damp moves: choppy, pinned),
-                  Negative below it (dealers add to moves: trending, bigger ranges)
-    Only strikes within ±band of the price are used.
+    * Call wall – strike at or above the price with the most call gamma (often resistance)
+    * Put wall  – strike at or below the price with the most put gamma (often support)
+    * Regime    – sign of net gamma around the current price: Positive = dealers damp moves
+                  (choppy, pinned), Negative = dealers add to moves (trending, bigger ranges)
+    * Flip      – nearest price where that net gamma changes sign; an estimate
+    Walls are looked for within ±band of the price.
     """
     out = {"Call wall": NAN, "Put wall": NAN, "Gamma flip": NAN, "Gamma": "—"}
     if df is None or df.empty or "strike" not in df.columns:
@@ -109,32 +109,40 @@ def gamma_levels(df: pd.DataFrame | None, spot: float = NAN, band: float = 0.10)
     d = df.copy()
     if "time" in d.columns and d["time"].nunique() > 1:      # several snapshots: keep the latest
         d = d[d["time"] == d["time"].max()]
-    if "price" in d.columns and not np.isfinite(spot):
-        spot = float(pd.to_numeric(d["price"], errors="coerce").dropna().iloc[-1]) if d["price"].notna().any() else NAN
+    if not np.isfinite(spot) and "price" in d.columns:
+        px = pd.to_numeric(d["price"], errors="coerce").dropna()
+        spot = float(px.iloc[-1]) if len(px) else NAN
     for c in ("strike", cg, pg):
         d[c] = pd.to_numeric(d[c], errors="coerce")
-    d = d.dropna(subset=["strike"]).sort_values("strike")
+    d = d.dropna(subset=["strike"]).sort_values("strike").reset_index(drop=True)
     call = d[cg].fillna(0).abs()
-    put = -d[pg].fillna(0).abs()                              # puts count as negative gamma
-    if np.isfinite(spot) and spot > 0:
-        keep = d["strike"].between(spot * (1 - band), spot * (1 + band))
-        d, call, put = d[keep], call[keep], put[keep]
-    if d.empty or (call.sum() == 0 and put.sum() == 0):
-        return out
-    out["Call wall"] = float(d["strike"][call.idxmax()]) if call.max() > 0 else NAN
-    out["Put wall"] = float(d["strike"][put.idxmin()]) if put.min() < 0 else NAN
-    net = (call + put).to_numpy()
-    cum = np.cumsum(net)
+    put = d[pg].fillna(0).abs()                               # size of put gamma
+    net = (call - put).to_numpy()                             # puts count as negative gamma
     strikes = d["strike"].to_numpy()
-    cross = np.where(np.sign(cum[:-1]) != np.sign(cum[1:]))[0]
+    if not np.isfinite(spot) or spot <= 0 or (call.sum() == 0 and put.sum() == 0):
+        return out
+
+    near = (strikes >= spot * (1 - band)) & (strikes <= spot * (1 + band))
+    above, below = near & (strikes >= spot), near & (strikes <= spot)
+    for name, side, size in (("Call wall", above, call), ("Put wall", below, put)):
+        pick = side if size[side].sum() > 0 else near          # nothing on that side: use the band
+        if size[pick].sum() > 0:
+            out[name] = float(strikes[size[pick].idxmax()])
+
+    # Net gamma profile across nearby prices: each strike's net gamma spread as a bell curve
+    # (~3% of the price wide), summed. Its sign at the price is the regime; where it crosses
+    # zero is the flip.
+    w = 0.03 * spot
+    grid = np.linspace(spot * (1 - 2 * band), spot * (1 + 2 * band), 401)
+    use = np.abs(strikes / spot - 1) <= 0.3
+    prof = (net[use][None, :] * np.exp(-((grid[:, None] - strikes[use][None, :]) / w) ** 2)).sum(axis=1)
+    at_spot = float(np.interp(spot, grid, prof))
+    out["Gamma"] = "Positive" if at_spot >= 0 else "Negative"
+    cross = np.where(np.sign(prof[:-1]) * np.sign(prof[1:]) < 0)[0]
     if len(cross):
-        flips = strikes[cross + 1]
-        flip = float(flips[np.argmin(np.abs(flips - spot))]) if np.isfinite(spot) else float(flips[0])
-        out["Gamma flip"] = flip
-        if np.isfinite(spot):
-            out["Gamma"] = "Positive" if spot >= flip else "Negative"
-    if out["Gamma"] == "—":
-        out["Gamma"] = "Positive" if net.sum() >= 0 else "Negative"
+        g0, g1, p0, p1 = grid[cross], grid[cross + 1], prof[cross], prof[cross + 1]
+        flips = g0 + (g1 - g0) * (-p0 / (p1 - p0))
+        out["Gamma flip"] = round(float(flips[np.argmin(np.abs(flips - spot))]), 2)
     return out
 
 
@@ -211,12 +219,12 @@ def scan_row(ticker: str, bars: pd.DataFrame, flow: pd.Series | None = None, gam
                 hits.append(f"Flow {100 - calls_pct:.0f}% puts")
                 bear += 1
 
-    if bull > bear or (bull == bear and gap == gap and gap > 0):
+    if bull > bear:
         direction, score = "▲ Bullish", bull
-    elif bear > bull or (bull == bear and gap == gap and gap < 0):
+    elif bear > bull:
         direction, score = "▼ Bearish", bear
-    else:
-        direction, score = "—", bull
+    else:   # equal pull both ways (e.g. gap down, but trading above the PM and opening-range highs)
+        direction, score = "◆ Mixed", bull
     row.update({
         "Score": int(score), "Direction": direction if score else "—",
         "Price": price, "Change %": (price / prev - 1) * 100 if prev == prev else NAN,

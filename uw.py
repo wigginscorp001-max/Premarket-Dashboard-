@@ -13,6 +13,7 @@ ENDPOINTS below, or use the "Any endpoint" box in the dashboard to try a path.
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -80,8 +81,12 @@ def get(path: str, params: dict | None = None, ticker: str | None = None):
     if ticker:
         path = path.replace("{ticker}", ticker.upper())
     params = {k: v for k, v in (params or {}).items() if v not in (None, "", [])}
-    r = requests.get(BASE + path, params=params, timeout=20,
-                     headers={"Authorization": f"Bearer {key}", "Accept": "application/json"})
+    for wait in (1.5, 3, None):   # rate limited (429): wait a moment and try again, twice
+        r = requests.get(BASE + path, params=params, timeout=20,
+                         headers={"Authorization": f"Bearer {key}", "Accept": "application/json"})
+        if r.status_code != 429 or wait is None:
+            break
+        time.sleep(wait)
     if r.status_code == 401:
         raise UWError("Unusual Whales rejected the key (401). Check UW_API_KEY in Streamlit Secrets (or .env on your Mac).")
     if r.status_code == 403:

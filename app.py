@@ -342,7 +342,7 @@ def load_flow_summary(tks: tuple, min_prem: int) -> pd.DataFrame:
     return out[out.index.isin(tks)]
 
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def load_gamma(t: str) -> dict:
     return sc.gamma_levels(uw.fetch("spot_gex_strike", ticker=t))
 
@@ -731,7 +731,7 @@ with tabs[0]:
 SCAN_HELP = {
     "Score": "How many of the 5 signals point the same way (gap, relative volume, PM range, opening range, "
              "options flow). Relative volume counts for both directions. 4–5 = strong agreement.",
-    "Direction": "▲ = most signals bullish, ▼ = most bearish.",
+    "Direction": "▲ = most signals bullish, ▼ = most bearish, ◆ Mixed = as many bullish as bearish – no clear edge.",
     "Signals": "Which signals are on right now.",
     "Change %": "Price now vs yesterday's 4:00 PM close.",
     "Gap %": "Before 9:30: last pre-market price vs yesterday's close. After 9:30: today's open vs yesterday's close.",
@@ -797,7 +797,7 @@ with tabs[1]:
                 flow = load_flow_summary(tuple(tl), MIN_FLOW)
             except Exception as e:  # noqa: BLE001
                 st.caption(f"Options flow unavailable ({e}).")
-        rows = []
+        rows, gamma_missing = [], []
         prog = st.progress(0.0, text="Scanning…") if len(tl) > 12 else None
         for i, t in enumerate(tl):
             gm = None
@@ -805,7 +805,7 @@ with tabs[1]:
                 try:
                     gm = load_gamma(t)
                 except Exception:  # noqa: BLE001
-                    gm = None
+                    gamma_missing.append(t)
             rows.append(sc.scan_row(t, load_intraday(t, demo), flow.loc[t] if t in flow.index else None, gm,
                                     min_gap=min_gap, min_rvol=min_rvol, min_flow=MIN_FLOW))
             if prog:
@@ -820,8 +820,10 @@ with tabs[1]:
                   "Calls $", "Puts $", "Call wall", "Put wall", "Gamma flip"):
             if c in res:
                 res[c] = pd.to_numeric(res[c], errors="coerce").astype(float)
-        res = res.assign(_g=res["Gap %"].abs()).sort_values(["Score", "_g"], ascending=False,
-                                                            na_position="last").drop(columns="_g")
+        # best first: higher score, then a clear direction before "Mixed", then the bigger gap
+        res = (res.assign(_d=~res["Direction"].str.startswith("◆"), _g=res["Gap %"].abs())
+               .sort_values(["Score", "_d", "_g"], ascending=False, na_position="last")
+               .drop(columns=["_d", "_g"]))
         m = st.columns(5)
         m[0].metric("Scanned", len(res))
         m[1].metric("▲ Bullish (score 3+)", int(((res["Score"] >= 3) & res["Direction"].str.startswith("▲")).sum()))
@@ -841,20 +843,34 @@ with tabs[1]:
                                                  "Put wall", "Gamma flip")]
         elif not want_gamma:
             cols = [c for c in cols if c not in ("Gamma", "Call wall", "Put wall", "Gamma flip")]
-        money = {c: (lambda v: "—" if pd.isna(v) else f"${v / 1e6:,.1f}M" if v >= 1e6 else f"${v / 1e3:,.0f}K")
-                 for c in ("Calls $", "Puts $")}
-        price_cols = ("Price", "PM high", "PM low", "ORB high", "ORB low", "Call wall", "Put wall", "Gamma flip")
-        styled = (shown[cols].style
-                  .format({c: "{:,.2f}" for c in price_cols if c in cols}
-                          | {"Change %": "{:+.2f}%", "Gap %": "{:+.2f}%", "RVOL": "{:.1f}x",
-                             "Calls %": "{:.0f}%", "Gap $": usd_signed} | money, na_rep="—")
-                  .map(signed_color, subset=[c for c in ("Change %", "Gap %", "Gap $") if c in cols])
+        # Columns that are often empty are turned into text, because the table shows empty
+        # number cells as "None" – here they read "—".
+        money = lambda v: f"${v / 1e6:,.1f}M" if v >= 1e6 else f"${v / 1e3:,.0f}K"   # noqa: E731
+        as_text = {"ORB high": "{:,.2f}".format, "ORB low": "{:,.2f}".format, "Calls %": "{:.0f}%".format,
+                   "Calls $": money, "Puts $": money, "Call wall": "{:,.2f}".format,
+                   "Put wall": "{:,.2f}".format, "Gamma flip": "{:,.2f}".format}
+        disp = shown[cols].copy()
+        for c, fn in as_text.items():
+            if c in disp:
+                disp[c] = shown[c].map(lambda v, fn=fn: "—" if pd.isna(v) else fn(v))
+        for c in disp.columns:
+            if disp[c].dtype == object or pd.api.types.is_string_dtype(disp[c]):
+                disp[c] = disp[c].fillna("—")
+        signed = [c for c in ("Change %", "Gap %", "Gap $") if c in cols]
+        styled = (disp.style
+                  .format({c: "{:,.2f}" for c in ("Price", "PM high", "PM low") if c in cols}
+                          | {"Change %": "{:+.2f}%", "Gap %": "{:+.2f}%", "RVOL": "{:.1f}x", "Gap $": usd_signed},
+                          na_rep="—")
+                  .map(signed_color, subset=signed)
                   .map(lambda v: f"color: {UP}" if str(v).startswith("▲") else
                        f"color: {DOWN}" if str(v).startswith("▼") else "", subset=["Direction"]))
         st.dataframe(styled, hide_index=True, width="stretch", height=min(38 * (len(shown) + 1), 720),
                      column_config={c: st.column_config.Column(help=h) for c, h in SCAN_HELP.items() if c in cols})
         if shown.empty:
             st.info("Nothing matches these filters – lower **Min score** or the gap / volume minimums.")
+        if gamma_missing:
+            st.caption(f"Gamma levels didn't load for {', '.join(gamma_missing)} (Unusual Whales busy or no "
+                       "options data) – press 🔄 Refresh all data in a minute to retry.")
         st.caption(f"Updated {data.now_et():%H:%M:%S} ET · flow = unusual options alerts of "
                    f"${MIN_FLOW:,}+ from the latest session"
                    + ("" if live else " · turn on Auto-refresh in the sidebar for live updates"))
