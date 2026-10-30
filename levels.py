@@ -96,17 +96,26 @@ def swing_levels(bars: pd.DataFrame, k: int = 3, lookback: int = 120,
     win = 2 * k + 1
     hi = d["High"][d["High"] == d["High"].rolling(win, center=True).max()]
     lo = d["Low"][d["Low"] == d["Low"].rolling(win, center=True).min()]
-    pts = sorted(list(hi.values) + list(lo.values))
+    pts = sorted(list(zip(hi.values, hi.index)) + list(zip(lo.values, lo.index)))
     levels: list[dict] = []
-    for p in pts:
+    for p, when in pts:
         if levels and p - levels[-1]["last"] <= merge_atr * a:
             lv = levels[-1]
             lv["sum"] += p
             lv["touches"] += 1
             lv["last"] = p
+            lv["when"] = max(lv["when"], when)
         else:
-            levels.append({"sum": p, "touches": 1, "last": p})
-    return [{"price": lv["sum"] / lv["touches"], "touches": lv["touches"]} for lv in levels]
+            levels.append({"sum": p, "touches": 1, "last": p, "when": when})
+    return [{"price": lv["sum"] / lv["touches"], "touches": lv["touches"], "when": lv["when"]} for lv in levels]
+
+
+def current_sr(levels: list[dict], price: float) -> tuple[list[dict], list[dict]]:
+    """([the most recently formed resistance above price], [the most recent support below])."""
+    above = [lv for lv in levels if lv["price"] > price]
+    below = [lv for lv in levels if lv["price"] <= price]
+    latest = lambda xs: [max(xs, key=lambda lv: lv["when"])] if xs else []   # noqa: E731
+    return latest(above), latest(below)
 
 
 def nearest_sr(levels: list[dict], price: float, n: int = 2) -> tuple[list[dict], list[dict]]:

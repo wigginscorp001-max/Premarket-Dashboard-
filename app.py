@@ -606,6 +606,31 @@ LEVEL_GROUPS = {
 }
 
 
+def day_sr(t: str) -> tuple[list[dict], list[dict]]:
+    """One resistance and one support line from the 30-minute opening range (9:30–10:00 ET).
+
+    From 10:00: resistance = today's opening-range high, support = today's opening-range low.
+    Before 10:00 (or on a day with no session yet): the previous session's opening range.
+    """
+    bars = load_intraday(t, demo)
+    if bars.empty:
+        return [], []
+    m = bars.index.hour * 60 + bars.index.minute
+    orb = bars[(m >= 570) & (m < 600)]
+    if orb.empty:
+        return [], []
+    now = data.now_et()
+    after_10 = now.hour * 60 + now.minute >= 600
+    days = [d for d in sorted(set(orb.index.date)) if d < now.date() or (d == now.date() and after_10)]
+    if not days:
+        return [], []
+    day = days[-1]
+    d = orb[orb.index.date == day]
+    tag = "today" if day == now.date() else f"{day:%d/%b}"
+    return ([{"price": float(d["High"].max()), "label": f"OR high {tag}"}],
+            [{"price": float(d["Low"].min()), "label": f"OR low {tag}"}])
+
+
 def price_chart(t: str, tf: str, groups: list[str], *, key: str, height: int = 430,
                 custom: tuple | None = None, extra_levels=(), extra_lines=(), note_prefix: str = "") -> None:
     """Touch chart for one ticker: candles + EMA 9 / EMA 200 / volume / MACD, plus key levels."""
@@ -653,16 +678,12 @@ def price_chart(t: str, tf: str, groups: list[str], *, key: str, height: int = 4
         if "ORH" in lvls:
             notes.insert(1, f"OR {lvls['ORH']:,.2f} / {lvls['ORL']:,.2f}"
                          + (" (locked)" if L["orb_locked"] else " (forming)"))
-    elif intraday:
-        sr_res, sr_sup = [], []
-    else:
-        sr = load_long_sr(t, demo, tf in ("Weekly", "Max") or (custom is not None and custom[2] == "Weekly"))
-        sr_res, sr_sup = lvl.nearest_sr(sr, float(bars["Close"].iloc[-1]), n=3)
+    sr_res, sr_sup = day_sr(t)
     if "Support / resistance" in groups:
         for r in sr_res:
-            add(r["price"], f"Resistance ({r['touches']}×)", DOWN, "dot")
+            add(r["price"], f"Resistance · {r['label']}", DOWN, "dot")
         for x in sr_sup:
-            add(x["price"], f"Support ({x['touches']}×)", UP, "dot")
+            add(x["price"], f"Support · {x['label']}", UP, "dot")
         if sr_res:
             notes.append("R " + ", ".join(f"{r['price']:,.2f}" for r in sr_res))
         if sr_sup:
@@ -1536,8 +1557,9 @@ with tabs[5]:
     tf, custom = tf_picker("chart_tf", "5m")
     groups = st.multiselect("Lines", list(LEVEL_GROUPS), default=list(LEVEL_GROUPS), key="chart_groups")
     if not is_intraday(tf, custom):
-        st.caption("Daily and longer charts show longer-term support & resistance. Pre-market and "
-                   "opening-range lines appear on the 1-minute to 1-hour timeframes.")
+        st.caption("Support & resistance on every chart = the 9:30–10:00 opening-range low & high (today's "
+                   "after 10:00, the previous day's before). Pre-market lines appear on the 1-minute to 1-hour "
+                   "timeframes.")
     if not picks:
         st.info("Pick at least one ticker.")
 
