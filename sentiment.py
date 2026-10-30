@@ -37,7 +37,8 @@ def tide_score(tide: pd.DataFrame | None) -> tuple[float, str] | None:
     c, p = _col(tide, "net_call_premium"), _col(tide, "net_put_premium")
     if not (c and p):
         return None
-    nc, npp = float(pd.to_numeric(tide[c]).iloc[-1]), float(pd.to_numeric(tide[p]).iloc[-1])
+    t = tide.sort_values(_col(tide, "timestamp", "date")) if _col(tide, "timestamp", "date") else tide
+    nc, npp = float(pd.to_numeric(t[c]).iloc[-1]), float(pd.to_numeric(t[p]).iloc[-1])
     tot = abs(nc) + abs(npp)
     if not tot:
         return None
@@ -83,6 +84,8 @@ def breadth_score(changes: list[float]) -> tuple[float, str] | None:
 def iv_score(ivr: pd.DataFrame | None) -> tuple[float, str] | None:
     if ivr is None or ivr.empty:
         return None
+    if "date" in ivr.columns:
+        ivr = ivr.sort_values("date")
     col = _col(ivr, "iv_rank_1y", "iv_rank", "rank")
     if not col:
         return None

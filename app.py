@@ -515,7 +515,7 @@ def market_mood(demo: bool) -> tuple[float, pd.DataFrame]:
 
 def mood_gauge(score: float) -> go.Figure:
     fig = go.Figure(go.Indicator(
-        mode="gauge+number", value=score, number=dict(suffix="", font=dict(size=40)),
+        mode="gauge+number", value=round(score), number=dict(font=dict(size=40)),
         title=dict(text=f"<b>{sent.label(score)}</b>", font=dict(size=18)),
         gauge=dict(axis=dict(range=[0, 100], tickvals=[0, 25, 45, 55, 75, 100]),
                    bar=dict(color="#e2e8f0", thickness=0.25),
@@ -1387,15 +1387,30 @@ with tabs[3]:
 # 0a4. Ticker Intel – everything Unusual Whales has on one ticker
 # --------------------------------------------------------------------------- #
 def intel_table(name: str, title: str, params: dict | None = None, ticker: str | None = None,
-                lead: tuple = (), rows: int = 15, sort: str | None = None) -> None:
+                lead: tuple = (), rows: int = 15, sort: str | None = None, only_lead: bool = False) -> None:
     df, why = uw_quiet(name, params, ticker)
     st.markdown(f"**{title}**")
     if df is None or df.empty:
         st.caption(f"— {why or 'no data'}")
         return
+    # some UW lists ignore the ticker filter and return the whole market: keep this ticker's rows only
+    tk = ticker or (params or {}).get("ticker") or (params or {}).get("ticker_symbol")
+    if tk:
+        if "ticker" in df.columns and df["ticker"].nunique() > 1:
+            df = df[df["ticker"].astype(str).str.upper() == tk.upper()]
+        elif "tickers" in df.columns:
+            df = df[df["tickers"].astype(str).str.upper().str.contains(rf"\b{tk.upper()}\b", regex=True)]
+        if df.empty:
+            st.caption(f"— nothing recent for {tk}")
+            return
+    if name == "price_levels" and {"lit_vol", "off_vol"} <= set(df.columns):
+        df = df.assign(total_vol=pd.to_numeric(df["lit_vol"], errors="coerce").fillna(0)
+                       + pd.to_numeric(df["off_vol"], errors="coerce").fillna(0))
+        sort = "total_vol"
     if sort and sort in df.columns:
         df = df.sort_values(sort, ascending=False, key=lambda c: pd.to_numeric(c, errors="coerce"))
-    cols = [c for c in lead if c in df.columns] + [c for c in df.columns if c not in lead]
+    cols = [c for c in lead if c in df.columns] + ([] if only_lead else [c for c in df.columns if c not in lead])
+    cols = [c for c in cols if not c.endswith("_id") and c not in ("id", "marketcap")]
     st.dataframe(pretty_dates(df[cols].head(rows)), hide_index=True, width="stretch")
 
 
@@ -1423,6 +1438,8 @@ with tabs[4]:
         m[0].metric("Price", "—" if pd.isna(px) else f"{px:,.2f}",
                     None if pd.isna(prev) or pd.isna(px) else f"{(px / prev - 1) * 100:+.2f}%")
         ivr, _ = uw_quiet("iv_rank", ticker=it)
+        if ivr is not None and "date" in ivr:
+            ivr = ivr.sort_values("date")
         if ivr is not None and len(ivr):
             col = first_col(ivr, "iv_rank_1y", "iv_rank", "rank")
             if col:
@@ -1430,12 +1447,19 @@ with tabs[4]:
                 m[1].metric("IV rank (1y)", f"{v * 100 if v <= 1 else v:.0f}")
         mp, _ = uw_quiet("max_pain", ticker=it)
         if mp is not None and len(mp) and first_col(mp, "max_pain"):
-            m[2].metric("Max pain (next expiry)", f"{float(mp[first_col(mp, 'max_pain')].iloc[0]):,.2f}")
+            if "expiry" in mp:
+                exp = pd.to_datetime(mp["expiry"], errors="coerce")
+                mp = mp[exp.dt.date >= data.now_et().date()].assign(_e=exp).sort_values("_e") if \
+                    (exp.dt.date >= data.now_et().date()).any() else mp
+            row = mp.iloc[0]
+            m[2].metric("Max pain (next expiry)", f"{float(row[first_col(mp, 'max_pain')]):,.2f}",
+                        help=f"Expiry {lvl.fmt_date(row['expiry'])}" if "expiry" in mp else None)
         try:
             g = sc.gamma_levels(load_gamma_strikes(it), spot=px)
             m[3].metric("Gamma", g["Gamma"], help="Positive = choppy/pinned · Negative = moves can run")
-            m[4].metric("Call wall / Put wall", f"{g['Call wall']:,.0f} / {g['Put wall']:,.0f}"
-                        if g["Call wall"] == g["Call wall"] and g["Put wall"] == g["Put wall"] else "—")
+            m[4].metric("Call / Put wall", f"{g['Call wall']:g}/{g['Put wall']:g}"
+                        if g["Call wall"] == g["Call wall"] and g["Put wall"] == g["Put wall"] else "—",
+                        help=f"Call wall {g['Call wall']:,.2f} (resistance) · Put wall {g['Put wall']:,.2f} (support)")
         except Exception:  # noqa: BLE001
             pass
         w = sent.week52(load_daily_uw(it, demo), px)
@@ -1445,7 +1469,11 @@ with tabs[4]:
 
         ov, _ = uw_quiet("options_volume", ticker=it)
         if ov is not None and len(ov):
-            r = ov.iloc[0]
+            traded = ov[pd.to_numeric(ov.get("call_volume", 0), errors="coerce").fillna(0)
+                        + pd.to_numeric(ov.get("put_volume", 0), errors="coerce").fillna(0) > 0]
+            r = traded.iloc[0] if len(traded) else ov.iloc[0]   # before the open, today is still 0
+            if "date" in r and len(traded) and r.name != ov.index[0]:
+                st.caption(f"Options volume from {lvl.fmt_date(r['date'])} (today's options haven't traded yet).")
             cv, pv = r.get("call_volume"), r.get("put_volume")
             cp, pp = r.get("call_premium"), r.get("put_premium")
             o = st.columns(4)
@@ -1459,8 +1487,8 @@ with tabs[4]:
                        "Analysts & institutions", "Earnings", "News"])
         with sec[0]:
             intel_table("flow_alerts", "Unusual options alerts", {"ticker_symbol": it, "limit": 50},
-                        lead=("created_at", "type", "strike", "expiry", "total_premium", "volume", "open_interest",
-                              "alert_rule", "has_sweep"), rows=25)
+                        lead=("created_at", "type", "strike", "expiry", "total_premium", "price", "volume",
+                              "open_interest", "alert_rule", "has_sweep", "underlying_price"), rows=25, only_lead=True)
             nt, _ = uw_quiet("net_prem_ticks", ticker=it)
             if nt is not None and len(nt):
                 xcol = first_col(nt, "tape_time", "timestamp", "time", "date")
