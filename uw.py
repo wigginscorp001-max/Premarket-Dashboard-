@@ -39,6 +39,19 @@ ENDPOINTS = {
     "ohlc": "/api/stock/{ticker}/ohlc/{size}",
     "flow_ticker": "/api/stock/{ticker}/flow-recent",
     "net_prem_ticks": "/api/stock/{ticker}/net-prem-ticks",
+    # ticker deep dive
+    "stock_info": "/api/stock/{ticker}/info",
+    "oi_change": "/api/stock/{ticker}/oi-change",
+    "price_levels": "/api/stock/{ticker}/stock-volume-price-levels",
+    "iv_term": "/api/stock/{ticker}/volatility/term-structure",
+    "short_interest": "/api/shorts/{ticker}/interest-float",
+    "insider": "/api/insider/transactions",          # ?ticker_symbol=
+    "congress": "/api/congress/recent-trades",       # ?ticker=
+    "analysts": "/api/screener/analysts",            # ?ticker=
+    "institutions": "/api/institution/{ticker}/ownership",
+    "news": "/api/news/headlines",                   # ?ticker=
+    "seasonality": "/api/seasonality/{ticker}/monthly",
+    "etf_holdings": "/api/etfs/{ticker}/holdings",
 }
 
 
@@ -130,7 +143,10 @@ def _parse_candles(payload) -> pd.DataFrame:
                  if c in df.columns), None)
     if tcol is None:
         raise UWError(f"Unexpected candle format: {list(df.columns)}")
-    idx = pd.to_datetime(df[tcol], utc=True).dt.tz_convert("America/New_York")
+    if tcol == "date":   # daily candles carry a plain date: that date in New York, not midnight UTC
+        idx = pd.to_datetime(df[tcol]).dt.tz_localize("America/New_York")
+    else:
+        idx = pd.to_datetime(df[tcol], utc=True).dt.tz_convert("America/New_York")
     out = pd.DataFrame({c.title(): pd.to_numeric(df[c], errors="coerce")
                         for c in ("open", "high", "low", "close", "volume") if c in df.columns})
     out.index = pd.DatetimeIndex(idx)

@@ -1,0 +1,30 @@
+python3 - << 'PY' 2>/dev/null
+import json, os, requests
+key = json.load(open(os.path.expanduser("~/TradingJournal/uw_config.json")))["api_token"]
+H = {"Authorization": f"Bearer {key}", "Accept": "application/json"}
+T = "NVDA"
+checks = [("Market tide (mood)", "/api/market/market-tide", {}),
+          ("SPY options volume (mood)", "/api/stock/SPY/options-volume", {}),
+          ("SPY IV rank (mood)", "/api/stock/SPY/iv-rank", {}),
+          ("Max pain", f"/api/stock/{T}/max-pain", {}),
+          ("Net premium ticks", f"/api/stock/{T}/net-prem-ticks", {}),
+          ("Dark pool", f"/api/darkpool/{T}", {}),
+          ("OI change", f"/api/stock/{T}/oi-change", {}),
+          ("Volume by price", f"/api/stock/{T}/stock-volume-price-levels", {}),
+          ("IV term structure", f"/api/stock/{T}/volatility/term-structure", {}),
+          ("Short interest", f"/api/shorts/{T}/interest-float", {}),
+          ("Insider trades", "/api/insider/transactions", {"ticker_symbol": T}),
+          ("Congress trades", "/api/congress/recent-trades", {"ticker": T}),
+          ("Analyst ratings", "/api/screener/analysts", {"ticker": T}),
+          ("Institutions", f"/api/institution/{T}/ownership", {}),
+          ("News", "/api/news/headlines", {"ticker": T}),
+          ("Seasonality", f"/api/seasonality/{T}/monthly", {})]
+for name, path, params in checks:
+    try:
+        r = requests.get("https://api.unusualwhales.com" + path, headers=H, params=params, timeout=20)
+        d = r.json().get("data", []) if r.ok else []
+        d = [d] if isinstance(d, dict) else d
+        print(f"{name:26} HTTP {r.status_code} | rows {len(d):4} | {list(d[0].keys())[:7] if d else r.text[:60]}")
+    except Exception as e:
+        print(f"{name:26} failed: {e}")
+PY

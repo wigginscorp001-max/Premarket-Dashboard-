@@ -63,3 +63,17 @@
   option contracts (greeks, OI, volume), ETF holdings QQQ (102) – ready to replace Yahoo/Wikipedia.
 - SPY holdings returned only 250 rows (not ~503) – check paging before using it for the S&P 500 list.
 - Not covered by UW: futures, VIX/10Y/DXY, crypto, forex → paid feeds when Sa'Rah decides.
+
+## Friends beta (after this iteration)
+- Small group of friends tests the site; code stays private (owner-only access).
+- Steps: make GitHub repo private → give Streamlit access to private repos → app sharing set to
+  "only specific people" → invite friends by email (viewer only; no Manage app, no Secrets, no code).
+- Check data licenses before sharing (UW / FMP personal plans may not allow showing data to others).
+
+## Built 30/Oct/2026 (overnight)
+- 🐳 Ticker Intel tab: UW profile, IV rank, max pain, gamma, options volume, flow alerts, net premium,
+  dark pool, OI change, volume by price, IV term structure, short interest, insiders, Congress,
+  analysts, institutions, earnings history, seasonality, news (paths to confirm with uw_check).
+- Market mood gauge (fear ↔ greed) on Pre-Market: market tide, SPY put/call, IV rank, gamma,
+  momentum, 52-week position, sector breadth.
+- 52-week highs & lows table on Pre-Market (UW daily candles).

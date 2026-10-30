@@ -20,6 +20,7 @@ import patterns as pt
 import scanner as sc
 import heatmap as hm
 import sectors as secs
+import sentiment as sent
 import session as ses
 import tvchart
 import uw
@@ -328,6 +329,81 @@ def index_members(name: str, top: int = 100) -> tuple[pd.DataFrame, str]:
         return pd.DataFrame(columns=["Ticker", "Company", "Sector", "Sub-industry"]), f"⚠️ {e}"
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_earnings_snapshot(t: str, report: pd.Timestamp, demo: bool) -> dict:
+    snap = data.earnings_snapshot(t, report, demo=demo)
+    if uw.api_key() and not demo:       # the options market's expected move for that report
+        try:
+            ue = uw.fetch("earnings_ticker", ticker=t)
+            if "report_date" in ue and "expected_move_perc" in ue:
+                hit = ue[pd.to_datetime(ue["report_date"], errors="coerce").dt.date == report.date()]
+                if len(hit) and pd.notna(hit["expected_move_perc"].iloc[0]):
+                    v = float(hit["expected_move_perc"].iloc[0])
+                    snap["Expected move %"] = v * 100 if v < 1 else v
+        except Exception:  # noqa: BLE001
+            pass
+    return snap
+
+
+EARN_CSS = """
+<style>
+.ew { width:100%; border-collapse:collapse; font-size:13px; }
+.ew th { text-align:left; color:#94a3b8; font-weight:600; padding:6px 8px; border-bottom:1px solid #1f2937; }
+.ew td { padding:6px 8px; border-bottom:1px solid #1f2937; }
+.ew .t { position:relative; font-weight:700; color:#60a5fa; cursor:help; border-bottom:1px dotted #60a5fa; }
+.ew .pop { display:none; position:absolute; left:0; top:22px; z-index:50; width:300px; background:#0f172a;
+           border:1px solid #334155; border-radius:10px; padding:10px 12px; box-shadow:0 8px 24px rgba(0,0,0,.5);
+           font-weight:400; color:#e2e8f0; line-height:1.55; white-space:normal; }
+.ew .t:hover .pop, .ew .t:focus .pop, .ew .t:focus-within .pop { display:block; }
+.ew .pop b { color:#fff; } .ew .up { color:#34d399; } .ew .down { color:#f87171; } .ew .mut { color:#94a3b8; }
+</style>
+"""
+
+
+def _num(v, fmt="{:+.2f}"):
+    return "—" if v is None or pd.isna(v) else fmt.format(v)
+
+
+def earnings_pop(r: pd.Series, snap: dict | None) -> str:
+    """Trader summary for one report: EPS vs estimate, diluted EPS, profit, revenue, reaction."""
+    t = html.escape(r["Ticker"])
+    if snap is None:     # hasn't reported yet
+        return (f"<b>{t}</b> reports {r['Day']} {lvl.fmt_date(r['Date'])} · {html.escape(str(r['When']))}"
+                f"<br>EPS estimate: <b>{_num(r['EPS est'], '{:.2f}')}</b>"
+                "<br><span class='mut'>Results appear here after the report.</span>")
+    est, act = r["EPS est"], r["EPS actual"]
+    lines = [f"<b>{t}</b> · reported {r['Day']} {lvl.fmt_date(r['Date'])} ({html.escape(str(r['When']))})"]
+    if pd.notna(act) and pd.notna(est):
+        diff = act - est
+        verdict = ("<span class='up'>✅ BEAT</span>" if diff > 0.005 else
+                   "<span class='down'>❌ MISSED</span>" if diff < -0.005 else "➖ MET")
+        sp = r.get("Surprise %")
+        lines.append(f"EPS (adjusted): <b>{act:.2f}</b> vs est {est:.2f} → {verdict}"
+                     + (f" ({sp:+.1f}%)" if sp is not None and pd.notna(sp) else ""))
+    elif pd.notna(act):
+        lines.append(f"EPS (adjusted): <b>{act:.2f}</b>")
+    if "Diluted EPS" in snap:
+        lines.append(f"Diluted EPS (GAAP): <b>{snap['Diluted EPS']:.2f}</b>")
+    if "Net income" in snap:
+        ni = snap["Net income"]
+        lines.append(("<span class='up'>✅ Profitable</span>" if ni > 0 else "<span class='down'>❌ Not profitable</span>")
+                     + f" · net income {hm.money(ni)}")
+    if "Revenue" in snap:
+        yoy = snap.get("Revenue YoY %")
+        lines.append(f"Revenue {hm.money(snap['Revenue'])}"
+                     + (f" · <span class='{'up' if yoy >= 0 else 'down'}'>{yoy:+.1f}% vs last year</span>"
+                        if yoy is not None and pd.notna(yoy) else ""))
+    if "Reaction %" in snap:
+        rx = snap["Reaction %"]
+        em = snap.get("Expected move %")
+        lines.append(f"Stock reaction: <span class='{'up' if rx >= 0 else 'down'}'><b>{rx:+.1f}%</b></span>"
+                     + (f" vs expected ±{em:.1f}%" if em is not None and pd.notna(em) else ""))
+    if snap.get("Quarter"):
+        lines.append(f"<span class='mut'>Statement: {snap['Quarter']}</span>")
+    lines.append("<span class='mut'>Call summary: coming with the transcripts feed.</span>")
+    return "<br>".join(lines)
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_earnings_week(tks: tuple, start: dt.date, end: dt.date, demo: bool) -> pd.DataFrame:
     return data.earnings_between(list(tks), start, end, demo=demo)
@@ -382,6 +458,72 @@ def last_price(t: str) -> float:
         return float(i["Close"].iloc[-1])
     d = load_daily(t, demo)
     return float(d["Close"].iloc[-1]) if len(d) else float("nan")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_daily_uw(t: str, demo: bool) -> pd.DataFrame:
+    """Daily candles from Unusual Whales (about 3 years); the regular daily history otherwise."""
+    if uw.api_key() and not demo:
+        try:
+            d = uw.candles(t, "1d")
+            if len(d) > 200:
+                d.index = d.index.tz_localize(None).normalize()
+                return d[~d.index.duplicated(keep="last")]
+        except Exception:  # noqa: BLE001
+            pass
+    return load_daily(t, demo)
+
+
+def uw_quiet(name: str, params: dict | None = None, ticker: str | None = None) -> tuple[pd.DataFrame | None, str]:
+    """(data, problem) – like uw_panel but returns the reason instead of printing a warning."""
+    try:
+        df = load_uw(name, tuple(sorted((params or {}).items())), ticker)
+        return df, ("" if len(df) else "no data")
+    except uw.UWError as e:
+        return None, str(e)
+    except Exception as e:  # noqa: BLE001
+        return None, f"request failed: {e}"
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def market_mood(demo: bool) -> tuple[float, pd.DataFrame]:
+    """Fear ↔ greed gauge from Unusual Whales data (plus prices)."""
+    has_uw = bool(uw.api_key()) and not demo
+    parts: dict = {}
+    if has_uw:
+        parts["Options money (market tide)"] = sent.tide_score(uw_quiet("market_tide")[0])
+        parts["Put/call ratio"] = sent.put_call_score(uw_quiet("options_volume", ticker="SPY")[0])
+        parts["Volatility (IV rank)"] = sent.iv_score(uw_quiet("iv_rank", ticker="SPY")[0])
+        try:
+            spy_px = last_price("SPY")
+            parts["Dealer gamma"] = sent.gamma_score(
+                sc.gamma_levels(load_gamma_strikes("SPY"), spot=spy_px)["Gamma"])
+        except Exception:  # noqa: BLE001
+            pass
+    spy = load_daily_uw("SPY", demo)
+    parts["Momentum"] = sent.momentum_score(spy)
+    parts["52-week range"] = sent.range_score(spy)
+    changes = []
+    for etf in hm.SECTOR_ETFS:
+        bars = load_intraday(etf, demo)
+        if len(bars):
+            prev = ses.today(etf, bars).get("Prev close", np.nan)
+            changes.append((float(bars["Close"].iloc[-1]) / prev - 1) * 100 if prev == prev and prev else np.nan)
+    parts["Sector breadth"] = sent.breadth_score(changes)
+    return sent.gauge(parts)
+
+
+def mood_gauge(score: float) -> go.Figure:
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number", value=score, number=dict(suffix="", font=dict(size=40)),
+        title=dict(text=f"<b>{sent.label(score)}</b>", font=dict(size=18)),
+        gauge=dict(axis=dict(range=[0, 100], tickvals=[0, 25, 45, 55, 75, 100]),
+                   bar=dict(color="#e2e8f0", thickness=0.25),
+                   steps=[dict(range=[0, 25], color="#991b1b"), dict(range=[25, 45], color="#ea580c"),
+                          dict(range=[45, 55], color="#64748b"), dict(range=[55, 75], color="#65a30d"),
+                          dict(range=[75, 100], color="#15803d")])))
+    fig.update_layout(height=260, margin=dict(l=20, r=20, t=50, b=10), paper_bgcolor="rgba(0,0,0,0)")
+    return fig
 
 
 def no_data(t: str) -> None:
@@ -598,7 +740,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-SECTIONS = ["🌅 Pre-Market", "🔎 Scanner", "🎯 Confluence", "🟩 Heat Map", "📊 Charts & Levels", "🗂️ Sectors", "🧭 PM → Close", "📐 Setups & Patterns",
+SECTIONS = ["🌅 Pre-Market", "🔎 Scanner", "🎯 Confluence", "🟩 Heat Map", "🐳 Ticker Intel", "📊 Charts & Levels", "🗂️ Sectors", "🧭 PM → Close", "📐 Setups & Patterns",
             "🐋 Options Flow", "🎯 Options & LEAPS", "📅 Earnings", "📈 Swing Odds",
             "⚡ Day Trading", "🧩 My Scripts"]
 
@@ -645,6 +787,48 @@ with tabs[0]:
         fmt = f"{r['Last']:,.2f}" if r["Last"] < 1000 else f"{r['Last']:,.0f}"
         cols[i % 5].metric(r["Name"], fmt, f"{r['Chg %']:+.2f}%" if pd.notna(r["Chg %"]) else None,
                            delta_color="inverse" if r["Symbol"] in ("^VIX", "^TNX") else "normal")
+
+    st.subheader("Market mood – fear ↔ greed")
+    g1, g2 = st.columns([1, 1.6])
+    try:
+        mood, mood_parts = market_mood(demo)
+    except Exception as e:  # noqa: BLE001
+        mood, mood_parts = float("nan"), pd.DataFrame()
+        st.caption(f"Market mood unavailable ({e.__class__.__name__}).")
+    if mood == mood:
+        g1.plotly_chart(mood_gauge(mood), width="stretch", theme=None, key="mood_gauge")
+        g2.dataframe(mood_parts, hide_index=True, width="stretch",
+                     column_config={"Score": st.column_config.ProgressColumn(
+                         "Score", min_value=0, max_value=100, format="%d",
+                         help="0 = extreme fear · 50 = neutral · 100 = extreme greed")})
+        g2.caption("Average of the readings shown, 0 = extreme fear, 100 = extreme greed. Built from Unusual "
+                   "Whales options data (market tide, SPY put/call, IV rank, dealer gamma) plus SPY trend "
+                   "and sector breadth. Not financial advice.")
+
+    st.subheader("52-week highs & lows")
+    rows52 = []
+    for t in tickers:
+        w = sent.week52(load_daily_uw(t, demo), last_price(t))
+        if not w:
+            continue
+        flag = ("🔺 At 52-week high" if w["From high %"] >= -0.1 else "🔻 At 52-week low" if w["From low %"] <= 0.1
+                else "Near high (≤2%)" if w["From high %"] >= -2 else "Near low (≤2%)"
+                if w["From low %"] <= 2 else "")
+        rows52.append({"Ticker": t, "Flag": flag, "Price": w["Price"], "52w high": w["52w high"],
+                       "High date": lvl.fmt_date(w["High date"]), "From high": w["From high %"],
+                       "52w low": w["52w low"], "Low date": lvl.fmt_date(w["Low date"]),
+                       "From low": w["From low %"], "Range": w["Range %"]})
+    if rows52:
+        t52 = pd.DataFrame(rows52).sort_values("Range", ascending=False)
+        st.dataframe(t52.style.format({"Price": "{:,.2f}", "52w high": "{:,.2f}", "52w low": "{:,.2f}",
+                                       "From high": "{:+.1f}%", "From low": "{:+.1f}%"}, na_rep="—")
+                     .map(signed_color, subset=["From high", "From low"]),
+                     hide_index=True, width="stretch", height=min(38 * (len(t52) + 1), 620),
+                     column_config={"Range": st.column_config.ProgressColumn(
+                         "Where in range", min_value=0, max_value=100, format="%.0f%%",
+                         help="0% = at the 52-week low · 100% = at the 52-week high")})
+        st.caption("Sorted from closest to the 52-week high to closest to the low. Uses today's live price, "
+                   "so a new high or low shows up as it happens.")
 
     if crypto_list:
         with st.expander(f"🪙 Crypto ({len(crypto_list)}) – ✅ Recognized by SEC and CFTC", expanded=False):
@@ -742,12 +926,16 @@ with tabs[0]:
                 "Support 2": L["support"][1]["price"] if len(L["support"]) > 1 else None,
             })
         kl = pd.DataFrame(rows)
-        num = [c for c in kl.columns if c not in ("Ticker", "OR status")]
-        st.dataframe(kl.style.format({c: "{:,.2f}" for c in num}, na_rep="—"),
+        for c in kl.columns:       # as text, so empty cells read "—" (the table shows empty numbers as "None")
+            if c not in ("Ticker", "OR status"):
+                kl[c] = pd.to_numeric(kl[c], errors="coerce").map(lambda v: "—" if pd.isna(v) else f"{v:,.2f}")
+        kl = kl.fillna("—")
+        st.dataframe(kl,
                      hide_index=True, width="stretch", height=min(38 * (len(kl) + 1), 640))
 
     key_levels_table()
     st.caption("Charts with these lines drawn in: **📊 Charts & Levels** tab.")
+
 
 # --------------------------------------------------------------------------- #
 # 0a. Scanner
@@ -1147,8 +1335,8 @@ with tabs[3]:
             return
         if hm_view == "Crypto":
             cx = load_crypto_layers(demo)
-            no_cap = cx.loc[~(cx["Market cap"] > 0), "Ticker"].tolist()
-            cx = cx[cx["Price"].notna()]
+            no_cap = cx.loc[~(cx["Market cap"] > 0) | cx["Change %"].isna(), "Ticker"].tolist()
+            cx = cx[cx["Price"].notna() & cx["Change %"].notna()]
             if cx.empty:
                 st.warning("No crypto prices right now.")
                 return
@@ -1158,7 +1346,7 @@ with tabs[3]:
                             width="stretch", theme=None, key="hm_crypto")
             st.caption("Crypto assets – major blockchains and their networks, no meme coins. $ change is per coin, "
                        "vs 24 hours ago; colour is full green/red at ±5%."
-                       + (f" Not shown (no market cap): {', '.join(no_cap)}." if no_cap else ""))
+                       + (f" Not shown (no price or market cap yet): {', '.join(no_cap)}." if no_cap else ""))
             return
         mv = move_rows(hm_list)
         if mv.empty:
@@ -1196,9 +1384,122 @@ with tabs[3]:
     heat_map()
 
 # --------------------------------------------------------------------------- #
+# 0a4. Ticker Intel – everything Unusual Whales has on one ticker
+# --------------------------------------------------------------------------- #
+def intel_table(name: str, title: str, params: dict | None = None, ticker: str | None = None,
+                lead: tuple = (), rows: int = 15, sort: str | None = None) -> None:
+    df, why = uw_quiet(name, params, ticker)
+    st.markdown(f"**{title}**")
+    if df is None or df.empty:
+        st.caption(f"— {why or 'no data'}")
+        return
+    if sort and sort in df.columns:
+        df = df.sort_values(sort, ascending=False, key=lambda c: pd.to_numeric(c, errors="coerce"))
+    cols = [c for c in lead if c in df.columns] + [c for c in df.columns if c not in lead]
+    st.dataframe(pretty_dates(df[cols].head(rows)), hide_index=True, width="stretch")
+
+
+with tabs[4]:
+    st.caption("Everything Unusual Whales has on one ticker, in one place: price & profile, options activity, "
+               "gamma, dark pool, short interest, insiders, Congress, analysts, institutions and news. "
+               "A section that says '—' isn't available on your plan or has no data for this ticker.")
+    i1, i2 = st.columns([1, 1])
+    it_pick = i1.selectbox("Ticker", tickers, key="intel_pick")
+    it_typed = i2.text_input("…or type any ticker", "", placeholder="e.g. NVDA", key="intel_typed").strip().upper()
+    it = it_typed or it_pick
+    if not uw.api_key() or demo:
+        st.info("Ticker Intel needs your Unusual Whales key (and Demo data off).")
+    else:
+        info, why = uw_quiet("stock_info", ticker=it)
+        inf = info.iloc[0].to_dict() if info is not None and len(info) else {}
+        px = last_price(it)
+        bars = load_intraday(it, demo)
+        prev = ses.today(it, bars).get("Prev close", np.nan) if len(bars) else np.nan
+        st.markdown(f"### {it} · {inf.get('full_name', '')}")
+        st.caption(" · ".join(str(x) for x in (inf.get("sector"), inf.get("issue_type"),
+                                                 f"market cap {hm.money(float(inf['marketcap']))}"
+                                                 if inf.get("marketcap") not in (None, "") else None) if x))
+        m = st.columns(6)
+        m[0].metric("Price", "—" if pd.isna(px) else f"{px:,.2f}",
+                    None if pd.isna(prev) or pd.isna(px) else f"{(px / prev - 1) * 100:+.2f}%")
+        ivr, _ = uw_quiet("iv_rank", ticker=it)
+        if ivr is not None and len(ivr):
+            col = first_col(ivr, "iv_rank_1y", "iv_rank", "rank")
+            if col:
+                v = float(pd.to_numeric(ivr[col]).iloc[-1])
+                m[1].metric("IV rank (1y)", f"{v * 100 if v <= 1 else v:.0f}")
+        mp, _ = uw_quiet("max_pain", ticker=it)
+        if mp is not None and len(mp) and first_col(mp, "max_pain"):
+            m[2].metric("Max pain (next expiry)", f"{float(mp[first_col(mp, 'max_pain')].iloc[0]):,.2f}")
+        try:
+            g = sc.gamma_levels(load_gamma_strikes(it), spot=px)
+            m[3].metric("Gamma", g["Gamma"], help="Positive = choppy/pinned · Negative = moves can run")
+            m[4].metric("Call wall / Put wall", f"{g['Call wall']:,.0f} / {g['Put wall']:,.0f}"
+                        if g["Call wall"] == g["Call wall"] and g["Put wall"] == g["Put wall"] else "—")
+        except Exception:  # noqa: BLE001
+            pass
+        w = sent.week52(load_daily_uw(it, demo), px)
+        if w:
+            m[5].metric("52-week range", f"{w['Range %']:.0f}%",
+                        help=f"High {w['52w high']:,.2f} · Low {w['52w low']:,.2f}")
+
+        ov, _ = uw_quiet("options_volume", ticker=it)
+        if ov is not None and len(ov):
+            r = ov.iloc[0]
+            cv, pv = r.get("call_volume"), r.get("put_volume")
+            cp, pp = r.get("call_premium"), r.get("put_premium")
+            o = st.columns(4)
+            o[0].metric("Call volume", f"{float(cv):,.0f}" if cv is not None else "—")
+            o[1].metric("Put volume", f"{float(pv):,.0f}" if pv is not None else "—")
+            o[2].metric("Put/call", f"{float(pv) / float(cv):.2f}" if cv and pv is not None else "—")
+            o[3].metric("Call − put premium", hm.money(float(cp) - float(pp)) if cp is not None and pp is not None
+                        else "—")
+
+        sec = st.tabs(["Options flow", "Dark pool", "Positioning", "Short interest", "Insiders & Congress",
+                       "Analysts & institutions", "Earnings", "News"])
+        with sec[0]:
+            intel_table("flow_alerts", "Unusual options alerts", {"ticker_symbol": it, "limit": 50},
+                        lead=("created_at", "type", "strike", "expiry", "total_premium", "volume", "open_interest",
+                              "alert_rule", "has_sweep"), rows=25)
+            nt, _ = uw_quiet("net_prem_ticks", ticker=it)
+            if nt is not None and len(nt):
+                xcol = first_col(nt, "tape_time", "timestamp", "time", "date")
+                ys = [c for c in ("net_call_premium", "net_put_premium") if c in nt.columns]
+                if xcol and ys:
+                    fig = go.Figure()
+                    for col, color in zip(ys, (UP, DOWN)):
+                        fig.add_trace(go.Scatter(x=pd.to_datetime(nt[xcol]), y=pd.to_numeric(nt[col]).cumsum(),
+                                                 name=col.replace("_", " "), line=dict(color=color, width=2)))
+                    fig.update_layout(title="Net premium through the day (cumulative)", yaxis_tickprefix="$")
+                    st.plotly_chart(style_fig(fig, 340, intraday=True), width="stretch", theme="streamlit")
+        with sec[1]:
+            intel_table("darkpool_ticker", "Largest recent dark-pool prints", ticker=it,
+                        lead=("executed_at", "price", "size", "premium", "nbbo_bid", "nbbo_ask"), rows=25,
+                        sort="premium")
+        with sec[2]:
+            intel_table("oi_change", "Biggest open-interest changes", ticker=it, rows=20)
+            intel_table("price_levels", "Volume by price level (where shares traded)", ticker=it, rows=20)
+            intel_table("iv_term", "Implied-volatility term structure", ticker=it, rows=20)
+        with sec[3]:
+            intel_table("short_interest", "Short interest & float", ticker=it, rows=12)
+        with sec[4]:
+            intel_table("insider", "Insider trades", {"ticker_symbol": it, "limit": 30}, rows=30)
+            intel_table("congress", "Congress trades", {"ticker": it, "limit": 30}, rows=30)
+        with sec[5]:
+            intel_table("analysts", "Analyst ratings", {"ticker": it, "limit": 30}, rows=30)
+            intel_table("institutions", "Largest institutional holders", ticker=it, rows=20)
+        with sec[6]:
+            intel_table("earnings_ticker", "Earnings history (actual vs estimate, expected vs actual move)",
+                        ticker=it, lead=("report_date", "report_time", "actual_eps", "street_mean_est",
+                                         "expected_move_perc", "post_earnings_move_1d"), rows=12)
+            intel_table("seasonality", "Seasonality – average return by month", ticker=it, rows=12)
+        with sec[7]:
+            intel_table("news", "Headlines", {"ticker": it, "limit": 30}, rows=30)
+
+# --------------------------------------------------------------------------- #
 # 0b. Multi-ticker charts with levels
 # --------------------------------------------------------------------------- #
-with tabs[4]:
+with tabs[5]:
     picks = st.multiselect("Tickers", tickers, default=tickers[:4], max_selections=8, key="chart_picks")
     tf, custom = tf_picker("chart_tf", "5m")
     groups = st.multiselect("Lines", list(LEVEL_GROUPS), default=list(LEVEL_GROUPS), key="chart_groups")
@@ -1220,7 +1521,7 @@ with tabs[4]:
 # --------------------------------------------------------------------------- #
 # 1. Sectors: every S&P 500 sector, pre-market scan + company lookup
 # --------------------------------------------------------------------------- #
-with tabs[5]:
+with tabs[6]:
     try:
         sp = load_sp500()
     except Exception as e:  # noqa: BLE001
@@ -1304,7 +1605,7 @@ with tabs[5]:
 # --------------------------------------------------------------------------- #
 # 1a. Pre-market setup vs what happened by the afternoon
 # --------------------------------------------------------------------------- #
-with tabs[6]:
+with tabs[7]:
     st.caption("Your pre-market rules: **PM bias** = last pre-market price vs pre-market VWAP. "
                "**Opening range** = 9:30–10:00. **Behavior** compares the price after 10:00 with "
                "the opening range: **Breakout ▲** = above the 10:00 high, **Breakdown ▼** = below the 10:00 low; "
@@ -1389,7 +1690,7 @@ with tabs[6]:
 # --------------------------------------------------------------------------- #
 # 1b. Chart patterns / setups
 # --------------------------------------------------------------------------- #
-with tabs[7]:
+with tabs[8]:
     c1, c2, c3 = st.columns([1, 1, 2])
     tf = c1.radio("Scan on", ["Daily", "5-minute"], horizontal=True,
                   help="Which candles the pattern scanner looks at. Daily = swing setups. "
@@ -1456,7 +1757,7 @@ with tabs[7]:
 # --------------------------------------------------------------------------- #
 # 1c. Unusual Whales (real-time flow, dark pool, GEX, market tide)
 # --------------------------------------------------------------------------- #
-with tabs[8]:
+with tabs[9]:
     if not uw.api_key():
         st.info("**Connect Unusual Whales:** on the hosted site, open the app's **Settings → Secrets** "
                 "and add `UW_API_KEY = \"your_key\"`. Running on your Mac, it reads the key from "
@@ -1631,7 +1932,7 @@ with tabs[8]:
 # --------------------------------------------------------------------------- #
 # 2. Earnings
 # --------------------------------------------------------------------------- #
-with tabs[10]:
+with tabs[11]:
     st.subheader("Earnings this week")
     today_d = data.now_et().date()
     wk = st.radio("Week", ["This week", "Next week"], horizontal=True, key="earn_week")
@@ -1647,9 +1948,27 @@ with tabs[10]:
         if ew.empty:
             st.info("None of your watchlist tickers report this week.")
         else:
-            st.dataframe(ew.assign(Date=ew["Date"].map(lvl.fmt_date))
-                         .style.format({"EPS est": "{:.2f}", "EPS actual": "{:.2f}"}, na_rep="—"),
-                         hide_index=True, width="stretch")
+            st.caption("**Hover over a ticker** (tap it on the phone) for the trader summary after it reports: "
+                       "EPS vs estimate, diluted EPS, profitable or not, revenue and the stock's reaction.")
+            now = pd.Timestamp(data.now_et())
+            body = []
+            for _, r in ew.iterrows():
+                done = pd.notna(r["EPS actual"]) or (pd.notna(r["_ts"]) and r["_ts"] < now - pd.Timedelta(hours=1))
+                snap = load_earnings_snapshot(r["Ticker"], r["_ts"], demo) if done else None
+                est, act, sp = r["EPS est"], r["EPS actual"], r.get("Surprise %")
+                verdict = ("" if not (pd.notna(act) and pd.notna(est)) else
+                           "<span class='up'>Beat</span>" if act - est > 0.005 else
+                           "<span class='down'>Missed</span>" if act - est < -0.005 else "Met")
+                body.append(
+                    f"<tr><td>{lvl.fmt_date(r['Date'])}</td><td>{r['Day']}</td>"
+                    f"<td><span class='t' tabindex='0'>{html.escape(r['Ticker'])}"
+                    f"<span class='pop'>{earnings_pop(r, snap)}</span></span></td>"
+                    f"<td>{html.escape(str(r['Time (ET)']))}</td><td>{html.escape(str(r['When']))}</td>"
+                    f"<td>{_num(est, '{:.2f}')}</td><td>{_num(act, '{:.2f}')}</td>"
+                    f"<td>{verdict}{'' if sp is None or pd.isna(sp) else f' ({sp:+.1f}%)'}</td></tr>")
+            st.markdown(EARN_CSS + "<table class='ew'><tr><th>Date</th><th>Day</th><th>Ticker</th>"
+                        "<th>Time (ET)</th><th>When</th><th>EPS est</th><th>EPS actual</th><th>Result</th></tr>"
+                        + "".join(body) + "</table>", unsafe_allow_html=True)
     with ew_tabs[1]:
         if not uw.api_key() or demo:
             st.info("Needs your Unusual Whales key (and Demo data off).")
@@ -1723,7 +2042,7 @@ with tabs[10]:
 # --------------------------------------------------------------------------- #
 # 3. Swing setups
 # --------------------------------------------------------------------------- #
-with tabs[11]:
+with tabs[12]:
     st.caption(f"Setups: trend pullback, breakout, oversold bounce · stop {stop_atr}×ATR · "
                f"target {target_atr}×ATR · max {max_days} days.")
     with st.spinner("Scanning setups (backtesting each ticker)…"):
@@ -1784,7 +2103,7 @@ with tabs[11]:
 # --------------------------------------------------------------------------- #
 # 4. LEAPS
 # --------------------------------------------------------------------------- #
-with tabs[9]:
+with tabs[10]:
     c1, c2, c3, c4 = st.columns(4)
     lt = c1.selectbox("Ticker", tickers, key="leaps_pick")
     kind = c2.radio("Type", ["call", "put"], horizontal=True)
@@ -1824,7 +2143,7 @@ with tabs[9]:
 # --------------------------------------------------------------------------- #
 # 5. Day trading
 # --------------------------------------------------------------------------- #
-with tabs[12]:
+with tabs[13]:
     with st.expander("ℹ️ How to use this page"):
         st.markdown(
             "1. **Pick a ticker and a timeframe** (1m–5m for the open, 15m–1h for the trend of the day).\n"
@@ -1907,7 +2226,7 @@ with tabs[12]:
 # --------------------------------------------------------------------------- #
 # 6. Plugins: your own scripts
 # --------------------------------------------------------------------------- #
-with tabs[13]:
+with tabs[14]:
     st.caption("Drop a `.py` file into the `plugins/` folder with `TITLE = '…'` and "
                "`def run(tickers): …` – it appears here. See the examples in that folder.")
     plugin_files = sorted(p for p in (ROOT / "plugins").glob("*.py") if not p.name.startswith("_"))

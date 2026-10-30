@@ -21,16 +21,20 @@ SECTOR_ETFS = {
 
 
 def usd(v: float) -> str:
-    return "—" if not v == v else f"{'+' if v >= 0 else '-'}${abs(v):,.2f}"
+    """+$1.25 / -$0.0412 – extra decimals for moves under 10 cents (cheap coins and stocks)."""
+    if not v == v:
+        return "—"
+    return f"{'+' if v >= 0 else '-'}${abs(v):,.{4 if 0 < abs(v) < 0.1 else 2}f}"
 
 
 def money(v: float) -> str:
     if not v == v:
         return "—"
+    sign = "-" if v < 0 else ""
     for div, unit in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
         if abs(v) >= div:
-            return f"${v / div:,.1f}{unit}"
-    return f"${v:,.0f}"
+            return f"{sign}${abs(v) / div:,.1f}{unit}"
+    return f"{sign}${abs(v):,.0f}"
 
 
 def treemap(df: pd.DataFrame, *, size: str, color: str, text: list[str], hover: list[str],

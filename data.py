@@ -421,17 +421,21 @@ def earnings_between(tickers: list[str], start: dt.date, end: dt.date,
                     rows.append({"Date": ts.date(), "Day": f"{ts:%a}", "Ticker": t,
                                  "Time (ET)": "—" if ts.hour == 0 and ts.minute == 0 else f"{ts:%I:%M %p}",
                                  "When": _session_of(ts), "EPS est": r.get("EPS Estimate"),
-                                 "EPS actual": r.get("Reported EPS")})
+                                 "EPS actual": r.get("Reported EPS"), "Surprise %": r.get("Surprise(%)"),
+                                 "_ts": ts})
         elif t not in ETFS:
             rng = _rng(t, f"week{start}")
             if rng.random() < 0.3:
                 d = start + dt.timedelta(days=int(rng.integers(0, 5)))
                 ts = pd.Timestamp(dt.datetime.combine(d, dt.time(16, 5) if rng.random() < 0.6
                                                       else dt.time(7, 0)), tz=ET)
+                est = round(float(rng.uniform(0.2, 4)), 2)
+                act = round(est * float(rng.uniform(0.85, 1.2)), 2) if d < now_et().date() else None
                 rows.append({"Date": d, "Day": f"{ts:%a}", "Ticker": t, "Time (ET)": f"{ts:%I:%M %p}",
-                             "When": _session_of(ts), "EPS est": round(float(rng.uniform(0.2, 4)), 2),
-                             "EPS actual": None})
-    out = pd.DataFrame(rows, columns=["Date", "Day", "Ticker", "Time (ET)", "When", "EPS est", "EPS actual"])
+                             "When": _session_of(ts), "EPS est": est, "EPS actual": act,
+                             "Surprise %": (act / est - 1) * 100 if act else None, "_ts": ts})
+    out = pd.DataFrame(rows, columns=["Date", "Day", "Ticker", "Time (ET)", "When", "EPS est", "EPS actual",
+                                      "Surprise %", "_ts"])
     return out.sort_values(["Date", "When", "Ticker"]).reset_index(drop=True)
 
 
@@ -542,4 +546,47 @@ def market_caps(tickers: list[str], demo: bool = False) -> dict[str, float]:
                 except Exception:  # noqa: BLE001
                     cap = float("nan")
         out[t] = cap
+    return out
+
+
+def earnings_snapshot(ticker: str, report: pd.Timestamp, demo: bool = False) -> dict:
+    """What traders need after a report: GAAP diluted EPS, net income (profitable?), revenue and its
+    growth vs the same quarter last year, and the stock's reaction. Missing items are left out."""
+    out: dict = {}
+    if not _live(demo):
+        rng = _rng(ticker, f"snap{report.date()}")
+        ni = float(rng.normal(2e9, 3e9))
+        rev = float(rng.uniform(1e9, 40e9))
+        return {"Diluted EPS": round(float(rng.normal(1.5, 1.5)), 2), "Net income": ni, "Revenue": rev,
+                "Revenue YoY %": float(rng.normal(8, 12)), "Quarter": "Demo quarter",
+                "Reaction %": float(rng.normal(0, 5))}
+    if yf is not None:
+        try:
+            inc = yf.Ticker(ticker).quarterly_income_stmt
+            if inc is not None and not inc.empty:
+                cols = [c for c in inc.columns if pd.Timestamp(c).date() <= report.date()]
+                if cols:
+                    q = cols[0]
+                    out["Quarter"] = f"quarter ended {pd.Timestamp(q):%d/%b/%Y}"
+                    for row, key in (("Diluted EPS", "Diluted EPS"), ("Net Income", "Net income"),
+                                     ("Total Revenue", "Revenue")):
+                        if row in inc.index and pd.notna(inc.at[row, q]):
+                            out[key] = float(inc.at[row, q])
+                    year_ago = [c for c in inc.columns if 350 <= (pd.Timestamp(q) - pd.Timestamp(c)).days <= 380]
+                    if year_ago and "Total Revenue" in inc.index and pd.notna(inc.at["Total Revenue", year_ago[0]]):
+                        prev = float(inc.at["Total Revenue", year_ago[0]])
+                        if prev:
+                            out["Revenue YoY %"] = (out.get("Revenue", np.nan) / prev - 1) * 100
+        except Exception as e:  # noqa: BLE001
+            _warn(f"{ticker} income statement: {e.__class__.__name__}")
+    d = daily_history(ticker, period="3mo", demo=demo)["Close"].dropna()
+    if len(d):
+        dates = d.index.date
+        day = report.date()
+        if report.hour * 60 + report.minute < 570:          # before the open: that day vs the day before
+            before, after = d[dates < day], d[dates >= day]
+        else:                                               # after the close: next day vs report day
+            before, after = d[dates <= day], d[dates > day]
+        if len(before) and len(after):
+            out["Reaction %"] = (after.iloc[0] / before.iloc[-1] - 1) * 100
     return out
