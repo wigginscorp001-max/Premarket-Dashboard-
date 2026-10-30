@@ -32,6 +32,8 @@ MUTED = "#898781"
 
 COMPANY = "Wiggins Investments LLC"
 OPERATOR = "Sa'Rah El"
+AUM = "$5 Million"            # Assets Under Management – edit here
+VALUATION = "$50 Million"     # Market cap – edit here
 
 st.set_page_config(page_title=f"{COMPANY} — Trading Terminal", page_icon="📈", layout="wide")
 st.markdown("""
@@ -47,6 +49,7 @@ html, body, [class*="css"], .stMarkdown, .stMetric { font-family: 'Inter', sans-
 .badge { font: 600 10px ui-monospace, monospace; color:#60a5fa; background:rgba(30,58,138,.6);
          border:1px solid rgba(29,78,216,.5); border-radius:999px; padding:2px 8px; margin-left:6px; vertical-align:middle; }
 .sub { color:#94a3b8; font-size:12px; }
+.kpi { color:#e2e8f0; font-weight:600; }
 .status { display:flex; gap:8px; flex-wrap:wrap; }
 .pill { background:#0f172a; border:1px solid #1f2937; border-radius:8px; padding:5px 10px;
         font: 12px ui-monospace, monospace; color:#cbd5e1; }
@@ -731,6 +734,7 @@ st.markdown(f"""
     <div>
       <div class="name">{COMPANY.upper()} <span class="badge">LIVE TERMINAL</span></div>
       <div class="sub">Operator: {OPERATOR}</div>
+      <div class="sub">Assets Under Management <b class="kpi">{AUM}</b> · Market Cap <b class="kpi">{VALUATION}</b></div>
     </div>
   </div>
   <div class="status">
