@@ -1,0 +1,10 @@
+streamlit>=1.50,<1.67
+pandas>=2.0
+numpy>=1.26
+plotly>=5.20
+scipy>=1.11
+requests>=2.31
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+pyarrow>=14
+anthropic>=0.70
