@@ -123,3 +123,63 @@ def russell2000(top: int = 100) -> tuple[pd.DataFrame, str]:
     if df["Weight"].notna().any():
         df = df.sort_values("Weight", ascending=False)
     return df.head(top).reset_index(drop=True), src
+
+
+# Major US-listed ETFs by category (the most traded funds in each group).
+ETFS = {
+    "Broad market": {"SPY": "S&P 500", "VOO": "Vanguard S&P 500", "IVV": "iShares S&P 500", "QQQ": "Nasdaq-100",
+                     "DIA": "Dow 30", "IWM": "Russell 2000", "VTI": "Total US market", "RSP": "S&P 500 equal weight",
+                     "MDY": "S&P MidCap 400", "IJR": "S&P SmallCap 600", "VTV": "Value", "VUG": "Growth",
+                     "SCHD": "Dividend", "VIG": "Dividend growth", "MTUM": "Momentum", "QUAL": "Quality",
+                     "USMV": "Min volatility", "SPLG": "S&P 500 (low cost)", "QQQM": "Nasdaq-100 (low cost)"},
+    "Sectors (SPDR)": {"XLK": "Technology", "XLC": "Communication", "XLY": "Consumer discretionary",
+                       "XLP": "Consumer staples", "XLE": "Energy", "XLF": "Financials", "XLV": "Health care",
+                       "XLI": "Industrials", "XLB": "Materials", "XLRE": "Real estate", "XLU": "Utilities"},
+    "Industries & themes": {"SMH": "Semiconductors", "SOXX": "Semiconductors (iShares)", "IGV": "Software",
+                            "XBI": "Biotech", "IBB": "Biotech (large)", "KRE": "Regional banks", "KBE": "Banks",
+                            "XHB": "Homebuilders", "ITB": "Home construction", "XRT": "Retail", "XOP": "Oil & gas E&P",
+                            "OIH": "Oil services", "JETS": "Airlines", "ITA": "Aerospace & defense",
+                            "XAR": "Aerospace & defense (equal wt)", "TAN": "Solar", "ICLN": "Clean energy",
+                            "LIT": "Lithium & batteries", "URA": "Uranium", "COPX": "Copper miners",
+                            "GDX": "Gold miners", "GDXJ": "Junior gold miners", "SIL": "Silver miners",
+                            "ARKK": "ARK Innovation", "BOTZ": "Robotics & AI", "CIBR": "Cybersecurity",
+                            "SKYY": "Cloud", "HACK": "Cybersecurity (ETFMG)", "PAVE": "Infrastructure",
+                            "IYT": "Transportation", "VNQ": "REITs", "XME": "Metals & mining", "MOO": "Agribusiness"},
+    "International": {"EFA": "Developed markets", "EEM": "Emerging markets", "VEA": "Developed (Vanguard)",
+                      "VWO": "Emerging (Vanguard)", "FXI": "China large-cap", "KWEB": "China internet",
+                      "MCHI": "China", "EWJ": "Japan", "EWZ": "Brazil", "INDA": "India", "EWG": "Germany",
+                      "EWU": "United Kingdom", "EWT": "Taiwan", "EWY": "South Korea", "EWW": "Mexico",
+                      "EWC": "Canada", "EWA": "Australia", "VGK": "Europe", "ACWI": "All-world"},
+    "Bonds & rates": {"TLT": "20+ yr Treasuries", "IEF": "7–10 yr Treasuries", "SHY": "1–3 yr Treasuries",
+                      "BIL": "T-bills", "SGOV": "0–3 month T-bills", "AGG": "US aggregate bond", "BND": "Total bond",
+                      "LQD": "Investment-grade corporate", "HYG": "High yield", "JNK": "High yield (SPDR)",
+                      "TIP": "TIPS (inflation)", "EMB": "EM bonds", "MUB": "Municipal", "TBT": "2x short 20+ yr Treasuries"},
+    "Commodities & currencies": {"GLD": "Gold", "IAU": "Gold (iShares)", "SLV": "Silver", "USO": "Crude oil",
+                                 "UNG": "Natural gas", "DBC": "Commodities basket", "DBA": "Agriculture",
+                                 "CPER": "Copper", "PPLT": "Platinum", "UUP": "US dollar", "FXE": "Euro",
+                                 "FXY": "Japanese yen"},
+    "Volatility": {"VXX": "VIX short-term futures", "UVXY": "1.5x VIX short-term", "SVXY": "-0.5x VIX short-term",
+                   "VIXY": "VIX short-term (ProShares)"},
+    "Leveraged & inverse": {"TQQQ": "3x Nasdaq-100", "SQQQ": "-3x Nasdaq-100", "SPXL": "3x S&P 500",
+                            "SPXS": "-3x S&P 500", "UPRO": "3x S&P 500 (ProShares)", "SPXU": "-3x S&P 500 (ProShares)",
+                            "SSO": "2x S&P 500", "SDS": "-2x S&P 500", "SH": "-1x S&P 500", "PSQ": "-1x Nasdaq-100",
+                            "TNA": "3x Russell 2000", "TZA": "-3x Russell 2000", "SOXL": "3x Semiconductors",
+                            "SOXS": "-3x Semiconductors", "TECL": "3x Technology", "FAS": "3x Financials",
+                            "FAZ": "-3x Financials", "LABU": "3x Biotech", "LABD": "-3x Biotech",
+                            "NUGT": "2x Gold miners", "DUST": "-2x Gold miners", "TMF": "3x 20+ yr Treasuries",
+                            "TMV": "-3x 20+ yr Treasuries", "NVDL": "2x NVIDIA", "TSLL": "2x Tesla",
+                            "BITX": "2x Bitcoin"},
+    "Crypto": {"IBIT": "Bitcoin (iShares)", "FBTC": "Bitcoin (Fidelity)", "GBTC": "Bitcoin (Grayscale)",
+               "BITO": "Bitcoin futures", "ETHA": "Ether (iShares)", "FETH": "Ether (Fidelity)",
+               "ETHE": "Ether (Grayscale)", "BITB": "Bitcoin (Bitwise)"},
+    "Income & options strategies": {"JEPI": "Equity premium income", "JEPQ": "Nasdaq premium income",
+                                    "QYLD": "Nasdaq covered calls", "XYLD": "S&P covered calls",
+                                    "RYLD": "Russell covered calls", "DIVO": "Dividend + covered calls"},
+}
+
+
+def etf_list() -> pd.DataFrame:
+    """ETFs as Ticker / Company / Sector (category) / Sub-industry, like the S&P 500 list."""
+    rows = [{"Ticker": t, "Company": name, "Sector": cat, "Sub-industry": cat}
+            for cat, funds in ETFS.items() for t, name in funds.items()]
+    return pd.DataFrame(rows).drop_duplicates("Ticker").reset_index(drop=True)

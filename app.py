@@ -1533,26 +1533,41 @@ with tabs[5]:
     chart_grid()
 
 # --------------------------------------------------------------------------- #
-# 1. Sectors: every S&P 500 sector, pre-market scan + company lookup
+# 1. Sectors: S&P 500 / Nasdaq-100 / Russell 2000 by sector, plus ETFs by category
 # --------------------------------------------------------------------------- #
 with tabs[6]:
-    try:
-        sp = load_sp500()
-    except Exception as e:  # noqa: BLE001
-        st.warning(f"Couldn't load the S&P 500 sector list ({e.__class__.__name__}). "
-                   "Showing your watchlist as one group instead.")
-        sp = pd.DataFrame({"Ticker": tickers, "Company": tickers, "Sector": "Watchlist",
-                           "Sub-industry": "—"})
+    market = st.radio("Market", ["S&P 500", "Nasdaq-100", "Russell 2000", "ETFs"], horizontal=True,
+                      key="sec_market",
+                      help="Pick a market, then a sector (or ETF category) to see and scan every ticker in it.")
+    sp = pd.DataFrame(columns=["Ticker", "Company", "Sector", "Sub-industry"])
+    if market == "S&P 500":
+        try:
+            sp = load_sp500()
+        except Exception as e:  # noqa: BLE001
+            st.warning(f"Couldn't load the S&P 500 list ({e.__class__.__name__}).")
+    elif market == "ETFs":
+        sp = secs.etf_list()
+        st.caption(f"{len(sp)} of the most-traded US ETFs, grouped by category.")
+    else:
+        top = 2000 if market == "Russell 2000" else 100
+        sp, note = index_members(market, top)
+        st.caption(note)
+        sp = sp.assign(Sector=sp["Sector"].fillna("Other").replace({"nan": "Other", "": "Other"}),
+                       **{"Sub-industry": "—"})
+    if sp.empty:
+        sp = pd.DataFrame({"Ticker": tickers, "Company": tickers, "Sector": "Watchlist", "Sub-industry": "—"})
     sector_names = sorted(sp["Sector"].unique())
     c1, c2 = st.columns([2, 1])
-    sec = c1.selectbox("Sector", sector_names + ["ALL sectors (slow – ~500 tickers)"], key="sec_pick")
+    sec = c1.selectbox("Category" if market == "ETFs" else "Sector",
+                       sector_names + [f"ALL (slow – {len(sp)} tickers)"], key=f"sec_pick_{market}")
     lookup = c2.text_input("Look up any ticker", "", placeholder="e.g. NVDA").strip().upper()
 
     if lookup:
-        hit = sp[sp["Ticker"] == lookup]
+        everything = pd.concat([sp, secs.etf_list()], ignore_index=True)
+        hit = everything[everything["Ticker"] == lookup]
         info = hit.iloc[0] if len(hit) else None
         st.markdown(f"**{lookup}** — {info['Company']} · {info['Sector']} · {info['Sub-industry']}"
-                    if info is not None else f"**{lookup}** (not in the S&P 500 list)")
+                    if info is not None else f"**{lookup}** (not in the {market} list)")
         one = load_today((lookup,), demo)
         cols1 = [c for c in ("Ticker", "Prev close", "PM last", "Gap %", "PM high", "PM low", "PM VWAP",
                              "PM bias", "PM volume", "Last PM print", "ORB high", "ORB low",
@@ -1566,8 +1581,8 @@ with tabs[6]:
         st.dataframe(members, hide_index=True, width="stretch", height=420)
 
     if st.button(f"🔎 Scan pre-market for {sec.split(' (')[0]}", type="primary"):
-        st.session_state["sector_scanned"] = sec
-    if st.session_state.get("sector_scanned") == sec:
+        st.session_state["sector_scanned"] = f"{market}:{sec}"
+    if st.session_state.get("sector_scanned") == f"{market}:{sec}":
         rows = []
         prog = st.progress(0.0, text="Scanning…")
         tl = members["Ticker"].tolist()
