@@ -597,12 +597,10 @@ LEVEL_INFO = {
     "S1": ("Support 1 (pivot)", "First downside level from pivot math – a common first target for shorts."),
     "S2": ("Support 2 (pivot)", "Second, stronger downside level – reached on strong selling days."),
 }
-LEVEL_GROUPS = {
-    "Pre-market high/low": ["PMH", "PML"],
-    "Opening range 9:30–10:00": ["ORH", "ORL"],
-    "Prior day high/low/close": ["PDH", "PDL", "PDC"],
-    "Pivots": ["R1", "S1"],
-    "Support / resistance": [],
+LEVEL_GROUPS = {"Key levels": []}     # PDH, PDL, PreH, PreL – nothing else on the charts
+CHART_LINES = {
+    "PDH": ("PDH", "#38bdf8", "solid"), "PDL": ("PDL", "#38bdf8", "solid"),      # previous day: sky blue
+    "PMH": ("PreH", "#f97316", "dash"), "PML": ("PreL", "#f97316", "dash"),      # pre-market: orange
 }
 
 
@@ -641,53 +639,17 @@ def price_chart(t: str, tf: str, groups: list[str], *, key: str, height: int = 4
         tvchart.render(bars, key=key, title=f"{t} · {label}")
         return
     lo, hi = float(bars["Low"].min()), float(bars["High"].max())
-    span = max(hi - lo, hi * 0.002)
     raw: list[tuple] = []          # (price, title, color, style)
     notes: list[str] = []
     markers: list[dict] = []
-
-    def add(y, text, color, dash):
-        if lo - 0.6 * span <= y <= hi + 0.6 * span:     # skip levels far off the chart
-            raw.append((float(y), text, color, dash))
-
-    L = load_levels(t, demo) if intraday else None
-    if L is not None:
-        for g in groups:
-            for k in LEVEL_GROUPS[g]:
-                if k not in L["levels"]:
-                    continue
-                name, color, dash = LEVEL_STYLE[k]
-                if k in ("ORH", "ORL") and not L["orb_locked"]:
-                    name += " (forming)"
-                if k in ("PMH", "PML") and not L["pm_locked"]:
-                    name += " (live)"
-                add(L["levels"][k], name, color, dash)
-        sr_res, sr_sup = L["resistance"], L["support"]
-        if "Opening range 9:30–10:00" in groups:
-            first = bars.index[0]
-            markers = [{"time": b["time"], "up": b["side"] == "up",
-                        "text": f"OR break {'up' if b['side'] == 'up' else 'down'}"}
-                       for b in L["breaks"] if b["time"] >= first]
-            if L["breaks"]:
-                notes.append("OR break: " + ", ".join(f"{b['side']} {b['time']:%H:%M}" for b in L["breaks"]))
-            elif L["orb_locked"]:
-                notes.append("OR: no break yet")
-        lvls = L["levels"]
-        if "PMH" in lvls:
-            notes.insert(0, f"PM {lvls['PMH']:,.2f} / {lvls['PML']:,.2f}" + ("" if L["pm_locked"] else " (live)"))
-        if "ORH" in lvls:
-            notes.insert(1, f"OR {lvls['ORH']:,.2f} / {lvls['ORL']:,.2f}"
-                         + (" (locked)" if L["orb_locked"] else " (forming)"))
-    sr_res, sr_sup = day_sr(t)
-    if "Support / resistance" in groups:
-        for r in sr_res:
-            add(r["price"], f"Resistance · {r['label']}", DOWN, "dot")
-        for x in sr_sup:
-            add(x["price"], f"Support · {x['label']}", UP, "dot")
-        if sr_res:
-            notes.append("R " + ", ".join(f"{r['price']:,.2f}" for r in sr_res))
-        if sr_sup:
-            notes.append("S " + ", ".join(f"{x['price']:,.2f}" for x in sr_sup))
+    # Only four lines on every chart: previous-day high/low and pre-market high/low.
+    L = load_levels(t, demo)
+    if L is not None and "Key levels" in groups:
+        for k in ("PDH", "PDL", "PMH", "PML"):
+            if k in L["levels"]:
+                abbr, color, dash = CHART_LINES[k]
+                raw.append((float(L["levels"][k]), abbr, color, dash))
+                notes.append(f"{abbr} {L['levels'][k]:,.2f}")
     for lv_ in extra_levels:
         raw.append((float(lv_["price"]), lv_["title"], lv_.get("color", MUTED), lv_.get("style", "dash")))
 
@@ -1555,11 +1517,9 @@ with tabs[4]:
 with tabs[5]:
     picks = st.multiselect("Tickers", tickers, default=tickers[:4], max_selections=8, key="chart_picks")
     tf, custom = tf_picker("chart_tf", "5m")
-    groups = st.multiselect("Lines", list(LEVEL_GROUPS), default=list(LEVEL_GROUPS), key="chart_groups")
-    if not is_intraday(tf, custom):
-        st.caption("Support & resistance on every chart = the 9:30–10:00 opening-range low & high (today's "
-                   "after 10:00, the previous day's before). Pre-market lines appear on the 1-minute to 1-hour "
-                   "timeframes.")
+    groups = list(LEVEL_GROUPS)
+    st.caption("Lines: **PDH / PDL** = previous day high / low (blue) · **PreH / PreL** = pre-market high / "
+               "low (orange). Plus EMA 9 (blue), EMA 200 (white), volume and MACD.")
     if not picks:
         st.info("Pick at least one ticker.")
 
@@ -1796,7 +1756,7 @@ with tabs[8]:
     elif mine:
         st.caption(f"Pattern lines are drawn on the {'Daily' if tf == 'Daily' else '5m'} timeframe "
                    "(the candles the scan used).")
-    price_chart(pk, ctf, ["Support / resistance"], key=f"pat_{pk}_{ctf}", custom=ccustom,
+    price_chart(pk, ctf, ["Key levels"], key=f"pat_{pk}_{ctf}", custom=ccustom,
                 extra_lines=pat_lines)
     if mine:
         st.write("Present now: " + ", ".join(f"**{f['Pattern']}** ({f['Bias'].lower()})" for f in mine))
@@ -2149,10 +2109,8 @@ with tabs[12]:
                      .style.format({"Win rate": "{:.0%}", "Avg return": "{:+.2%}", "Signals": "{:.0f}"},
                                    na_rep="—"), width="stretch")
         stf, scustom = tf_picker("swing_tf", "Daily")
-        price_chart(sp, stf, ["Support / resistance"], key=f"swing_{sp}_{stf}", custom=scustom,
-                    extra_levels=[{"price": pick["Stop"], "title": "Stop", "color": DOWN, "style": "dash"},
-                                  {"price": pick["Target"], "title": "Target", "color": UP, "style": "dash"}])
-        st.caption("Stop and target come from the daily setup scan above.")
+        price_chart(sp, stf, ["Key levels"], key=f"swing_{sp}_{stf}", custom=scustom)
+        st.caption(f"Setup stop **{pick['Stop']:,.2f}** · target **{pick['Target']:,.2f}** (from the daily scan above).")
 
 # --------------------------------------------------------------------------- #
 # 4. LEAPS
@@ -2255,18 +2213,20 @@ with tabs[13]:
                             "style": "solid", "title": "VWAP"}]
                 if rth.index[-1].date() == data.now_et().date():
                     vw_now = float(parts[-1].iloc[-1])
-        price_chart(dtk, dtf, list(LEVEL_GROUPS), key=f"dt_{dtk}_{dtf}", height=520, custom=dcustom,
-                    extra_lines=vw_line)
-        st.caption("Purple = **VWAP** (today's volume-weighted average price). Blue = EMA 9, white = EMA 200, "
-                   "bars at the bottom = volume, lower panel = MACD (red) and signal (yellow).")
+        price_chart(dtk, dtf, list(LEVEL_GROUPS), key=f"dt_{dtk}_{dtf}", height=520, custom=dcustom)
+        st.caption("Lines: **PDH / PDL** (blue) = previous day high / low · **PreH / PreL** (orange) = pre-market "
+                   "high / low. Blue = EMA 9, white = EMA 200, bars = volume, lower panel = MACD (red) / signal (yellow).")
 
         st.subheader("Levels – what each line means")
         price = last_price(dtk)
         rows = []
+        abbr = {"PDH": "PDH – Previous day high", "PDL": "PDL – Previous day low",
+                "PMH": "PreH – Pre-market high", "PML": "PreL – Pre-market low"}
         for k, (name, meaning) in LEVEL_INFO.items():
-            if k in lv:
+            if k in lv and k in abbr:
+                name = abbr[k]
                 rows.append({"Level": name, "Price": lv[k], "Meaning": meaning})
-        if vw_now is not None:
+        if False:      # VWAP isn't drawn on the chart any more
             rows.append({"Level": "VWAP (today)", "Price": vw_now,
                          "Meaning": "Volume-weighted average price. Above = buyers in control; below = sellers."})
         lt_df = pd.DataFrame(rows).sort_values("Price", ascending=False)
