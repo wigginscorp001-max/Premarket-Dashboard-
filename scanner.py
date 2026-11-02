@@ -244,7 +244,7 @@ def scan_row(ticker: str, bars: pd.DataFrame, flow: pd.Series | None = None, gam
 # Confluence card: 8 checks that either agree or disagree
 # --------------------------------------------------------------------------- #
 def confluence(row: dict, bars: pd.DataFrame, *, min_gap: float = 2.0, min_rvol: float = 2.0,
-               min_flow: float = 100_000) -> dict:
+               min_flow: float = 100_000, orng: dict | None = None) -> dict:
     """Eight quick checks for one ticker, each bullish (+1), bearish (-1) or neutral (0).
 
     `row` is a scan_row() result; `bars` are the same 5-minute bars with EMA 9 / EMA 200 /
@@ -283,13 +283,20 @@ def confluence(row: dict, bars: pd.DataFrame, *, min_gap: float = 2.0, min_rvol:
     vol_strong = rv == rv and rv >= min_rvol
     vol_text = ("Volume not ready" if rv != rv else f"Heavy volume {rv:.1f}x" if vol_strong else
                 f"Light volume {rv:.1f}x" if rv < 1 else f"Normal volume {rv:.1f}x")
-    orb, pm = row.get("ORB status", ""), row.get("PM status", "")
-    if orb in ("Above ORB high", "Below ORB low"):
-        checks.append((1 if orb.startswith("Above") else -1, orb))
-    elif pm in ("Above PM high", "Below PM low", "At PM high", "At PM low"):
-        checks.append((1 if "high" in pm else -1, pm))
+    if orng and price == price:         # opening range (5 or 30 minutes) – today's once it has formed
+        tag = f"OR {orng['minutes']}m" + ("" if orng["today"] else f" ({orng['day']:%d/%b})")
+        if price > orng["high"]:
+            checks.append((1, f"Above {tag} high ({orng['high']:,.2f})"))
+        elif price < orng["low"]:
+            checks.append((-1, f"Below {tag} low ({orng['low']:,.2f})"))
+        else:
+            checks.append((0, f"Inside {tag} ({orng['low']:,.2f}–{orng['high']:,.2f})"))
     else:
-        checks.append((0, orb if orb == "Inside ORB" else pm or "No breakout yet"))
+        pm = row.get("PM status", "")
+        if pm in ("Above PM high", "Below PM low", "At PM high", "At PM low"):
+            checks.append((1 if "high" in pm else -1, pm))
+        else:
+            checks.append((0, pm or "No breakout yet"))
     calls_pct = row.get("Calls %", NAN)
     total = (row.get("Calls $", 0) or 0) + (row.get("Puts $", 0) or 0)
     if calls_pct == calls_pct and total >= min_flow and calls_pct >= 60:
@@ -318,6 +325,25 @@ def confluence(row: dict, bars: pd.DataFrame, *, min_gap: float = 2.0, min_rvol:
         if w == w and price == price and price:
             d = (w / price - 1) * 100
             notes.append(f"{name} {w:,.2f} ({d:+.1f}%)" + (" ⚠️ close" if abs(d) <= 1 else ""))
-    return {"Ticker": row["Ticker"], "Price": price, "Change %": row.get("Change %", NAN),
+    return {"Ticker": row["Ticker"], "Price": price, "Change %": row.get("Change %", NAN), "OR": orng or {},
             "Direction": direction, "Bull": int(bull), "Bear": int(bear), "Total": len(checks),
             "Checks": checks, "Notes": notes}
+
+
+def opening_range(bars: pd.DataFrame, minutes: int = 30, now=None) -> dict:
+    """High/low of the first `minutes` after 9:30 ET, for the latest session where that window
+    has finished (today once it closes, otherwise the previous session)."""
+    if bars is None or bars.empty:
+        return {}
+    m = _minutes(bars.index)
+    win = bars[(m >= OPEN) & (m < OPEN + minutes)]
+    if win.empty:
+        return {}
+    now = now or pd.Timestamp.now(tz="America/New_York")
+    done = now.hour * 60 + now.minute >= OPEN + minutes
+    days = [d for d in sorted(set(win.index.date)) if d < now.date() or (d == now.date() and done)]
+    if not days:
+        return {}
+    d = win[win.index.date == days[-1]]
+    return {"high": float(d["High"].max()), "low": float(d["Low"].min()), "day": days[-1],
+            "today": days[-1] == now.date(), "minutes": minutes}

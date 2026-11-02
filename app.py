@@ -1123,6 +1123,8 @@ CARD_CSS = """
 .cc-dir.down { color:#f87171; background:rgba(239,68,68,.15); }
 .cc-dir.mixed { color:#fbbf24; background:rgba(245,158,11,.15); }
 .cc-list { margin:8px 0 4px; padding:0; list-style:none; font-size:13px; line-height:1.55; }
+.cc-or { margin-top:6px; font: 13px ui-monospace, monospace; color:#ff7ac8; }
+.cc-or b { color:#ff1aa8; }
 .cc-note { font-size:12px; color:#94a3b8; border-top:1px solid #1f2937; padding-top:6px; margin-top:4px; }
 </style>
 """
@@ -1147,8 +1149,12 @@ def card_html(c: dict) -> str:
     chg = c["Change %"]
     px = f"${c['Price']:,.2f}" + (f" · {chg:+.2f}%" if chg == chg else "") if c["Price"] == c["Price"] else "—"
     notes = "<br>".join(html.escape(n) for n in c["Notes"])
+    o = c.get("OR") or {}
+    or_box = ("" if not o else
+              f"<div class='cc-or'>OR {o['minutes']}m{'' if o['today'] else ' ' + o['day'].strftime('%d/%b')}: "
+              f"<b>H {o['high']:,.2f}</b> · <b>L {o['low']:,.2f}</b></div>")
     return (f"<div class='cc-head'><span class='cc-tk'>{html.escape(c['Ticker'])}</span>"
-            f"<span class='cc-px'>{px}</span><span class='cc-dir {cls}'>{label}</span></div>"
+            f"<span class='cc-px'>{px}</span><span class='cc-dir {cls}'>{label}</span></div>" + or_box +
             f"<ul class='cc-list'>{items}</ul>" + (f"<div class='cc-note'>{notes}</div>" if notes else ""))
 
 
@@ -1159,6 +1165,10 @@ with tabs[2]:
     cc_scope = k1.radio("Cards for", ["Watchlist", "Tickers I type"], horizontal=True, key="cc_scope")
     cc_list = tickers if cc_scope == "Watchlist" else data.read_watchlist(
         k2.text_input("Tickers", "", placeholder="e.g. NVDA, AMD, SMCI", key="cc_typed"))[0]
+    cc_or = st.radio("Opening range (OR)", [30, 5], horizontal=True, key="cc_or",
+                     format_func=lambda m: f"{m} min (9:30–{'10:00' if m == 30 else '9:35'})",
+                     help="High and low of the first 30 or 5 minutes after the 9:30 open. Before that window "
+                          "finishes, the previous session's opening range is used.")
     f1, f2 = st.expander("⚙️ Filters – direction, how many agree").columns(2)
     cc_show = f1.selectbox("Show", ["All", "Bullish", "Bearish", "Mixed"], key="cc_show")
     cc_min = f2.slider("At least this many agree", 0, 8, 0, key="cc_min",
@@ -1179,7 +1189,8 @@ with tabs[2]:
                 continue
             bars = load_intraday(r["Ticker"], demo)
             cards.append(sc.confluence(r, tvchart.add_indicators(bars) if len(bars) else bars,
-                                       min_gap=gap_min, min_rvol=rvol_min, min_flow=MIN_FLOW))
+                                       min_gap=gap_min, min_rvol=rvol_min, min_flow=MIN_FLOW,
+                                       orng=sc.opening_range(bars, cc_or, pd.Timestamp(data.now_et()))))
         for c in cards:
             c["Agree"] = c["Bull"] if c["Direction"].startswith("▲") else c["Bear"] if c["Direction"].startswith("▼") \
                 else max(c["Bull"], c["Bear"])
@@ -1207,7 +1218,12 @@ with tabs[2]:
             opened = st.session_state.get("cc_chart")
             if opened in [c["Ticker"] for c in cards[i:i + per_row]]:
                 with st.container(border=True):
-                    price_chart(opened, "5m", list(LEVEL_GROUPS), key=f"cc_chart_{opened}", height=460)
+                    o = next((c["OR"] for c in cards if c["Ticker"] == opened), {})
+                    orl = ([{"price": o["high"], "title": f"ORH {o['minutes']}m", "color": "#ff1aa8", "style": "solid"},
+                            {"price": o["low"], "title": f"ORL {o['minutes']}m", "color": "#ff1aa8", "style": "solid"}]
+                           if o else [])
+                    price_chart(opened, "5m", list(LEVEL_GROUPS), key=f"cc_chart_{opened}", height=460,
+                                extra_levels=orl)
 
     confluence_cards()
 
@@ -1613,15 +1629,6 @@ with tabs[6]:
                 st.markdown("**Top losers**")
                 st.dataframe(g.nsmallest(10, "Gap %")[show].style.format(fmt, na_rep="—")
                              .map(signed_color, subset=["Gap %"]), hide_index=True, width="stretch")
-            group = "Sector" if sec.startswith("ALL") else "Sub-industry"
-            by = g.groupby(group)["Gap %"].mean().sort_values()
-            fig = go.Figure(go.Bar(x=by.values, y=by.index, orientation="h",
-                                   marker_color=[UP if v > 0 else DOWN for v in by.values],
-                                   hovertemplate="%{y}: %{x:+.2f}%<extra></extra>"))
-            fig.update_layout(title=f"Average pre-market gap by {group.lower()}",
-                              height=max(300, 24 * len(by)), margin=dict(l=10, r=10, t=40, b=10),
-                              xaxis_ticksuffix="%")
-            st.plotly_chart(fig, width="stretch", theme="streamlit")
             st.markdown("**Every ticker**")
             st.dataframe(res[[c for c in show + ["Behavior"] if c in res.columns]]
                          .sort_values("Gap %", ascending=False, na_position="last")
