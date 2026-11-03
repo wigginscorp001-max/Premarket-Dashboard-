@@ -597,6 +597,10 @@ LEVEL_INFO = {
     "S1": ("Support 1 (pivot)", "First downside level from pivot math – a common first target for shorts."),
     "S2": ("Support 2 (pivot)", "Second, stronger downside level – reached on strong selling days."),
 }
+PERIOD_NAMES = {"1m": "Session", "2m": "Session", "3m": "2-day", "5m": "2-day", "10m": "7-day", "15m": "14-day",
+                "30m": "30-day", "1h": "60-day", "Daily": "6-month", "Weekly": "3-year", "YTD": "YTD",
+                "1Y": "52-week", "Max": "All-time"}
+PERIOD_COLOR = "#facc15"      # gold: high/low of the period on screen
 LEVEL_GROUPS = {"Key levels": []}     # PDH, PDL, PreH, PreL – nothing else on the charts
 CHART_LINES = {
     "PDH": ("PDH", "#38bdf8", "solid"), "PDL": ("PDL", "#38bdf8", "solid"),      # previous day: sky blue
@@ -643,7 +647,13 @@ def price_chart(t: str, tf: str, groups: list[str], *, key: str, height: int = 4
     notes: list[str] = []
     markers: list[dict] = []
     # Only four lines on every chart: previous-day high/low and pre-market high/low.
-    L = load_levels(t, demo)
+    # High and low of the period the timeframe shows (e.g. YTD high/low, 52-week high/low, all-time high/low)
+    period = PERIOD_NAMES.get(tf, "Range") if tf != "Custom" else "Range"
+    hi_t, lo_t = bars["High"].idxmax(), bars["Low"].idxmin()
+    for y, when, word in ((hi, hi_t, "High"), (lo, lo_t, "Low")):
+        raw.append((y, f"{period} {word}", PERIOD_COLOR, "solid"))
+        notes.append(f"{period} {word} {y:,.2f} ({lvl.fmt_date(when)})")
+    L = load_levels(t, demo) if intraday else None   # PDH/PDL/PreH/PreL only on intraday charts
     if L is not None and "Key levels" in groups:
         for k in ("PDH", "PDL", "PMH", "PML"):
             if k in L["levels"]:
@@ -1534,8 +1544,9 @@ with tabs[5]:
     picks = st.multiselect("Tickers", tickers, default=tickers[:4], max_selections=8, key="chart_picks")
     tf, custom = tf_picker("chart_tf", "5m")
     groups = list(LEVEL_GROUPS)
-    st.caption("Lines: **PDH / PDL** = previous day high / low (blue) · **PreH / PreL** = pre-market high / "
-               "low (orange). Plus EMA 9 (blue), EMA 200 (white), volume and MACD.")
+    st.caption("Gold = the **high and low of the timeframe you picked** (e.g. YTD High / YTD Low, 52-week, "
+               "All-time). Intraday charts also show **PDH / PDL** = previous day high / low (blue) and "
+               "**PreH / PreL** = pre-market high / low (orange). Plus EMA 9, EMA 200, volume and MACD.")
     if not picks:
         st.info("Pick at least one ticker.")
 
