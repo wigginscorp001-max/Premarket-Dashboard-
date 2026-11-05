@@ -46,7 +46,7 @@ b.wig-ok { color:#34d399; } b.wig-off { color:#fbbf24; }
 
 
 def show(badge: str = "OPTIONS DESK", feed_name: str = "DATA", live: bool = True,
-         status_text: str | None = None, logo: str = "📈") -> None:
+         status_text: str | None = None, logo: str = "📈", padding: str = "0") -> None:
     """Draw the header. live=False shows an orange dot and status_text (default 'OFFLINE')."""
     try:
         from zoneinfo import ZoneInfo
@@ -56,7 +56,7 @@ def show(badge: str = "OPTIONS DESK", feed_name: str = "DATA", live: bool = True
     state = status_text or ("LIVE" if live else "OFFLINE")
     cls = "ok" if live else "off"
     st.markdown(_CSS + f"""
-<div class="wig-hdr">
+<div style="padding:{padding}"><div class="wig-hdr">
   <div class="wig-brand">
     <div class="wig-logo">{logo}</div>
     <div>
@@ -69,5 +69,5 @@ def show(badge: str = "OPTIONS DESK", feed_name: str = "DATA", live: bool = True
     <div class="wig-pill"><span class="wig-dot {cls}"></span>{feed_name}: <b class="wig-{cls}">{state}</b></div>
     <div class="wig-pill">NY {now:%a %d/%b/%Y %H:%M}</div>
   </div>
-</div>
+</div></div>
 """, unsafe_allow_html=True)
