@@ -13,6 +13,8 @@ from bt import signals as sig
 from bt.sources import get_source
 
 COMPANY, OPERATOR = "Wiggins Investments LLC", "Sa'Rah El"
+AUM = "$5 Million"            # Assets Under Management – edit here (same as dashboard)
+VALUATION = "$50 Million"     # Market cap – edit here
 F = config.fmt_date
 
 st.set_page_config(page_title=f"{COMPANY} — Backtester", page_icon="🧪", layout="wide")
@@ -20,15 +22,23 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 html, body, [class*="css"], .stMarkdown, .stMetric { font-family: 'Inter', sans-serif; }
-.block-container { padding-top: 3.2rem; }
+.block-container { padding-top: 3.6rem; }
 .hdr { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;
-       background:#111827; border:1px solid #1f2937; border-radius:12px; padding:12px 16px; margin-bottom:10px; }
+       background:linear-gradient(135deg, #1e3a8a 0%, #172554 100%); border:1px solid #2563eb;
+       border-radius:14px; padding:14px 18px; margin-bottom:10px; box-shadow:0 6px 24px rgba(37,99,235,.25); }
 .brand { display:flex; align-items:center; gap:12px; }
-.logo { background:#7c3aed; border-radius:10px; padding:6px 9px; font-size:20px; }
-.name { font-weight:700; letter-spacing:.04em; color:#fff; font-size:17px; }
-.badge { font: 600 10px ui-monospace, monospace; color:#c4b5fd; background:rgba(76,29,149,.5);
-         border:1px solid rgba(124,58,237,.5); border-radius:999px; padding:2px 8px; margin-left:6px; }
-.sub { color:#94a3b8; font-size:12px; }
+.logo { background:#2563eb; border-radius:10px; padding:6px 9px; font-size:20px; box-shadow:0 4px 14px rgba(59,130,246,.45); }
+.name { font-weight:800; letter-spacing:.04em; color:#fff; font-size:18px; }
+.badge { font: 700 10px ui-monospace, monospace; color:#93c5fd; background:rgba(30,58,138,.8);
+         border:1px solid #3b82f6; border-radius:999px; padding:2px 8px; margin-left:6px; vertical-align:middle; }
+.sub { color:#cbd5e1; font-size:12px; }
+.kpi { color:#fff; font-weight:600; }
+.status { display:flex; gap:8px; flex-wrap:wrap; }
+.hdr .pill { background:#0f172a; border:1px solid rgba(96,165,250,.45); padding:5px 10px; margin:0; color:#e2e8f0; }
+.dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; }
+.dot.ok { background:#10b981; animation:pulse 1.6s infinite; } .dot.off { background:#f59e0b; }
+b.ok { color:#34d399; } b.off { color:#fbbf24; }
+@keyframes pulse { 50% { opacity:.35; } }
 .pill { display:inline-block; background:#0f172a; border:1px solid #1f2937; border-radius:8px; padding:4px 9px;
         font: 12px ui-monospace, monospace; color:#cbd5e1; margin:2px 4px 2px 0; }
 .ok { color:#34d399; } .off { color:#fbbf24; }
@@ -68,11 +78,32 @@ with st.sidebar:
 
 source = get_source(demo_mode)
 
+try:
+    from zoneinfo import ZoneInfo
+    now_ny = dt.datetime.now(ZoneInfo("America/New_York"))
+except Exception:
+    now_ny = dt.datetime.utcnow()
+if source.synthetic:
+    feed = '<span class="dot off"></span>DATA: <b class="off">DEMO</b>'
+elif not live_ready:
+    feed = '<span class="dot off"></span>DATA: <b class="off">NO KEY</b>'
+else:
+    feed = '<span class="dot ok"></span>ORATS + FMP: <b class="ok">LIVE</b>'
 st.markdown(f"""
-<div class="hdr"><div class="brand"><div class="logo">🧪</div>
-<div><div class="name">{COMPANY.upper()}<span class="badge">BACKTESTER</span></div>
-<div class="sub">Operator {OPERATOR} · Options swing & LEAPS backtests · {source.name}</div></div></div>
-<div class="sub">{F(dt.date.today())}</div></div>
+<div class="hdr">
+  <div class="brand">
+    <div class="logo">📈</div>
+    <div>
+      <div class="name">{COMPANY.upper()} <span class="badge">BACKTESTER</span></div>
+      <div class="sub">Operator: {OPERATOR}</div>
+      <div class="sub">Assets Under Management <b class="kpi">{AUM}</b> · Market Cap <b class="kpi">{VALUATION}</b></div>
+    </div>
+  </div>
+  <div class="status">
+    <div class="pill">{feed}</div>
+    <div class="pill">NY {now_ny:%a %d/%b/%Y %H:%M}</div>
+  </div>
+</div>
 """, unsafe_allow_html=True)
 if source.synthetic:
     st.markdown("<div class='warn'>⚠️ DEMO DATA – random synthetic prices. Use only to check the app works. "
