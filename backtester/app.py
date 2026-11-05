@@ -58,6 +58,21 @@ b.ok { color:#34d399; } b.off { color:#fbbf24; }
 </style>
 """, unsafe_allow_html=True)
 
+# --------------------------------------------------------------------------- password gate
+_pw = config.secret("BACKTEST_PASSWORD")
+if _pw and not st.session_state.get("authed"):
+    st.markdown("<div style='height:12vh'></div>", unsafe_allow_html=True)
+    col = st.container(key="login")
+    st.markdown("<style>.st-key-login{max-width:420px;margin:0 auto}</style>", unsafe_allow_html=True)
+    col.markdown(f"### 🔒 {COMPANY}\nOptions backtester – private")
+    entered = col.text_input("Password", type="password")
+    if entered:
+        if entered == _pw:
+            st.session_state.authed = True
+            st.rerun()
+        col.error("Wrong password.")
+    st.stop()
+
 keys = config.key_status()
 
 # --------------------------------------------------------------------------- sidebar
