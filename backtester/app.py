@@ -1,4 +1,4 @@
-"""Wiggins Investments LLC — Options Backtester.   Run:  streamlit run app.py"""
+"""Wiggins Investments LLC — Options Desk.   Run:  streamlit run app.py"""
 from __future__ import annotations
 
 import datetime as dt
@@ -17,7 +17,7 @@ AUM = "$5 Million"            # Assets Under Management – edit here (same as d
 VALUATION = "$50 Million"     # Market cap – edit here
 F = config.fmt_date
 
-st.set_page_config(page_title=f"{COMPANY} — Backtester", page_icon="🧪", layout="wide")
+st.set_page_config(page_title=f"{COMPANY} — Options Desk", page_icon="🧪", layout="wide")
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
@@ -94,7 +94,7 @@ st.markdown(f"""
   <div class="brand">
     <div class="logo">📈</div>
     <div>
-      <div class="name">{COMPANY.upper()} <span class="badge">BACKTESTER</span></div>
+      <div class="name">{COMPANY.upper()} <span class="badge">OPTIONS DESK</span></div>
       <div class="sub">Operator: {OPERATOR}</div>
       <div class="sub">Assets Under Management <b class="kpi">{AUM}</b> · Market Cap <b class="kpi">{VALUATION}</b></div>
     </div>
