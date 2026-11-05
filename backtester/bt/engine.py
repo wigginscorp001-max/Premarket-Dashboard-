@@ -47,6 +47,7 @@ class Params:
     max_positions: int = 5
     rules: sig.EntryRules = field(default_factory=sig.EntryRules)
     market_ticker: str = "SPY"
+    iv_regime_tags: bool = True              # tag each trade High/Low IV (needs IV rank history)
 
     @property
     def target_delta(self) -> float:
@@ -106,15 +107,17 @@ def run(p: Params, source, progress=None) -> Result:
         say(0.02 + 0.08 * i / max(len(p.tickers), 1), f"Loading prices for {t}…")
         px = source.prices(t)
         ivr = None
-        try:                      # also used to tag High/Low-IV regime on every trade
-            ivr = source.iv_rank(t)
-        except Exception as e:
-            notes.append(f"{t}: IV rank unavailable ({e}).")
+        if p.rules.ivr_filter or p.iv_regime_tags:
+            try:
+                ivr = source.iv_rank(t, p.start, p.end,
+                                     lambda f, m, i=i: say(0.02 + 0.08 * (i + f) / max(len(p.tickers), 1), m))
+            except Exception as e:
+                notes.append(f"{t}: IV rank unavailable ({e}).")
         orb = None
         if p.rules.orb_filter:
             orb = source.opening_range(t, p.start - pd.Timedelta(days=5), p.end)
             if orb is None or orb.empty:
-                notes.append(f"{t}: opening-range filter needs POLYGON_API_KEY – no ORB trades possible.")
+                notes.append(f"{t}: no opening-range data (needs Alpha Vantage, or POLYGON_API_KEY with ORATS + FMP) – no ORB trades possible.")
         f = ind.features(px, ivr, orb, p.rules.breakout_len)
         feats[t] = f
         sig_c[t], sig_p[t] = sig.entry_signals(f, p.rules)
@@ -189,7 +192,8 @@ def run(p: Params, source, progress=None) -> Result:
             reason = None
             if q is None:
                 if d >= pos["expiry"]:
-                    spot = feats[t]["close"].get(d, np.nan)
+                    col = "close_raw" if "close_raw" in feats[t].columns else "close"
+                    spot = feats[t][col].get(d, np.nan)
                     intrinsic = max(0.0, (spot - pos["strike"]) if pos["type"] == "C" else (pos["strike"] - spot))
                     q = pd.Series({"bid": intrinsic, "ask": intrinsic, "dte": 0})
                     reason = "Expired"

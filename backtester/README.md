@@ -33,7 +33,8 @@ calls vs puts / exit reason, every trade (CSV download), a chart of any trade, a
 | `app.py` | The Streamlit app (pages: Setup, Results, Trades, AI Analysis) |
 | `bt/engine.py` | Day-by-day backtest engine |
 | `bt/signals.py`, `bt/indicators.py` | Entry / exit rules, EMA, MACD, ATR, RVOL, gaps |
-| `bt/orats.py` | ORATS option chains + IV rank |
+| `bt/alphavantage.py` | Alpha Vantage: option chains, prices, earnings, opening range, IV rank |
+| `bt/orats.py` | ORATS option chains + IV rank (alternative) |
 | `bt/fmp.py` | FMP prices + earnings dates |
 | `bt/polygon.py` | Optional 30-min opening range |
 | `bt/store.py` | Saves every download (Supabase/Postgres or local SQLite) so nothing is re-downloaded |
@@ -41,14 +42,18 @@ calls vs puts / exit reason, every trade (CSV download), a chart of any trade, a
 | `bt/ai.py` | Claude analysis |
 | `bt/demo.py` | Synthetic data for testing the app only |
 
+## Data source
+**Alpha Vantage** (premium, $49.99/mo plan is enough) supplies everything: historical option chains
+since 2008 (bid/ask, IV, greeks, open interest), split-adjusted daily prices, earnings dates and 30-min
+bars for the opening range. IV rank is built from weekly at-the-money IV. ORATS + FMP (+ Polygon) remain
+available as an alternative in the sidebar.
+
 ## Secrets (Streamlit Cloud → app → Settings → Secrets)
 ```
-ORATS_API_KEY = "..."
-FMP_API_KEY = "..."
+ALPHAVANTAGE_API_KEY = "..."
+ALPHAVANTAGE_RPM = "75"
 ANTHROPIC_API_KEY = "..."
-UW_API_KEY = "..."
 # optional
-POLYGON_API_KEY = "..."
 DATABASE_URL = "postgresql://..."   # Supabase connection string (Session pooler)
 ```
 Without `DATABASE_URL`, downloads are cached in a local file that Streamlit Cloud wipes on reboot.

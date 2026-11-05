@@ -63,20 +63,27 @@ keys = config.key_status()
 # --------------------------------------------------------------------------- sidebar
 with st.sidebar:
     st.header("Data")
-    live_ready = keys["ORATS_API_KEY"] and keys["FMP_API_KEY"]
-    demo_mode = st.toggle("Demo data (synthetic – for testing the app only)", value=not live_ready,
-                          help="Turn OFF to backtest on real ORATS + FMP history.")
-    if not demo_mode and not live_ready:
-        st.error("Live mode needs ORATS_API_KEY and FMP_API_KEY in Secrets.")
+    ready = {"Alpha Vantage": keys["ALPHAVANTAGE_API_KEY"],
+             "ORATS + FMP": keys["ORATS_API_KEY"] and keys["FMP_API_KEY"],
+             "Demo (synthetic)": True}
+    choices = list(ready)
+    default = next(c for c in choices if ready[c])
+    src_name = st.radio("Data source", choices, index=choices.index(default),
+                        help="Demo = random synthetic data, only for checking the app works.")
+    live_ready = ready[src_name]
+    if not live_ready:
+        need = "ALPHAVANTAGE_API_KEY" if src_name == "Alpha Vantage" else "ORATS_API_KEY and FMP_API_KEY"
+        st.error(f"{src_name} needs {need} in Secrets.")
     st.caption("Keys found in Secrets:")
     st.markdown("".join(
         f"<span class='pill'><b class='{'ok' if v else 'off'}'>{'●' if v else '○'}</b> {k.replace('_API_KEY','')}</span>"
         for k, v in keys.items()), unsafe_allow_html=True)
     s = store.stats()
     st.caption(f"Cache: {s['backend']} · {s['entries']:,} saved downloads")
-    st.caption("Unusual Whales is not used here (no deep history). Polygon is optional (opening range).")
+    st.caption("Alpha Vantage covers option chains, prices, earnings and the 30-min opening range. "
+               "Live data (Schwab, Unusual Whales) stays in your Options Desk.")
 
-source = get_source(demo_mode)
+source = get_source(src_name)
 
 try:
     from zoneinfo import ZoneInfo
@@ -88,7 +95,7 @@ if source.synthetic:
 elif not live_ready:
     feed = '<span class="dot off"></span>DATA: <b class="off">NO KEY</b>'
 else:
-    feed = '<span class="dot ok"></span>ORATS + FMP: <b class="ok">LIVE</b>'
+    feed = f'<span class="dot ok"></span>{src_name.upper()}: <b class="ok">LIVE</b>'
 st.markdown(f"""
 <div class="hdr">
   <div class="brand">
@@ -107,7 +114,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 if source.synthetic:
     st.markdown("<div class='warn'>⚠️ DEMO DATA – random synthetic prices. Use only to check the app works. "
-                "Turn off <b>Demo data</b> in the sidebar for real results.</div>", unsafe_allow_html=True)
+                "Pick <b>Alpha Vantage</b> under Data source in the sidebar for real results.</div>", unsafe_allow_html=True)
 
 PRESETS = {
     "Swing (45–60 DTE)": dict(dte=(45, 60), delta=(0.60, 0.70), pt=50, sl=40, ts=21, hold=0,
@@ -153,7 +160,7 @@ with tab_setup:
         r_ivr = c3.checkbox("IV rank filter (buy cheap IV)", False, key=k("ivr"))
         ivr_max = c3.slider("IV rank max", 0, 100, 30, key=k("ivrmax"))
         r_orb = c3.checkbox("30-min opening range (9:30–10:00)", False, key=k("orb"),
-                            help="Calls: close above opening-range high. Puts: below the low. Needs POLYGON_API_KEY.")
+                            help="Calls: close above opening-range high. Puts: below the low. Uses Alpha Vantage 30-min bars (or Polygon with ORATS + FMP).")
         r_gap = c4.checkbox("Gap %", False, key=k("gap"))
         gap_min = c4.number_input("Min gap % (in trade direction)", 0.1, 20.0, 1.0, 0.1, key=k("gapmin"))
         r_rvol = c4.checkbox("Relative volume", False, key=k("rvol"))
@@ -162,6 +169,10 @@ with tab_setup:
         earn_mode = st.radio("Earnings", EARN, index=EARN.index(P["earn"]), horizontal=True, key=k("earn"),
                              help="Skip = no entry if earnings fall before the planned exit. "
                                   "Exit before = close the day before the report. LEAPS almost always span earnings, so Skip blocks them.")
+
+        ivtag = st.checkbox("Tag each trade High / Low IV (results by IV regime)", True, key=k("ivtag"),
+                            help="With Alpha Vantage this downloads one extra option chain per week of history "
+                                 "(saved after the first run). Untick to make the first run faster.")
 
         st.subheader("Exit rules")
         c1, c2, c3, c4 = st.columns(4)
@@ -184,7 +195,7 @@ with tab_setup:
                                help="Added on top of buying at the ask and selling at the bid.")
         go_btn = st.form_submit_button("▶ Run backtest", type="primary", use_container_width=True)
 
-    st.caption("Timing: signals use the day's close → orders fill on the NEXT trading day at the ORATS snapshot "
+    st.caption("Timing: signals use the day's close → orders fill on the NEXT trading day at that day's end-of-day option prices "
                "(buy at ask, sell at bid, + commission). Stops/targets are checked once a day.")
 
     if go_btn:
@@ -206,7 +217,8 @@ with tab_setup:
                 max_spread_pct=spread, min_oi=int(min_oi), profit_target=pt or None, stop_loss=sl or None,
                 time_stop_dte=ts or None, max_hold_days=hold or None, reversal_exit=rev_on,
                 reversal_rule=rev_rule, earnings_mode=earn_mode, commission=comm, slippage=slip,
-                capital=float(capital), alloc_pct=alloc, max_positions=int(maxpos), rules=rules)
+                capital=float(capital), alloc_pct=alloc, max_positions=int(maxpos), rules=rules,
+                iv_regime_tags=ivtag)
             bar = st.progress(0.0, "Starting…")
             try:
                 res = engine.run(params, source, progress=lambda f, m: bar.progress(min(max(f, 0.0), 1.0), m))
